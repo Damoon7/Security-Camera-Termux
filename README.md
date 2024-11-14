@@ -5,7 +5,7 @@ This is a python script that by running it on termux app in an Android phone you
 It regularly takes pictures of the desired place and if an external object enters, it starts to take pictures over and over and save them in the phone memory.
 
 It also can do these:
-- Send message to your phone that it detected an external object.
+- Send message to your phone when detects an external object.
 - Convert all taken pictures to a video file.
 - Call you, to alarm you
 - Send all taken pictures to your telegram
