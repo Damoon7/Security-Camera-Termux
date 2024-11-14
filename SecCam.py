@@ -88,9 +88,9 @@ while True:
 	dif=dif_of_images(img1, img2)
 	clock()
 	if dif>delta:
-		print('\nForeign Object Detected')
+		print('\nAn External Object Detected')
 		if args.sms is not None:
-			system("termux-sms-send -n " + args.sms + " Foreign Object Detected")
+			system("termux-sms-send -n " + args.sms + " An External Object Detected")
 			print("\nmessage sent to your phone")
 		if args.call is not None:
 			system("termux-telephony-call "+args.call)
