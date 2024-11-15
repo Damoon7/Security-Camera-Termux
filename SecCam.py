@@ -1,18 +1,17 @@
 from PIL import Image, ImageChops
 import numpy as np
 from os import system
-import time
 from datetime import datetime
-import argparse
 import os
-
+from argparse import ArgumentParser
+from time import sleep
 
 def dif_of_images(image1, image2):
     return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))
 
 def setup_num():
 	system("termux-camera-photo -c " + args.camera + " 001.jpeg")
-	time.sleep(1)
+	sleep(1)
 	system("termux-camera-photo -c " + args.camera + " 002.jpeg")
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
@@ -40,7 +39,7 @@ def countdown(t):
 		mins, secs = divmod(t, 60)
 		timer = '{:02d}:{:02d}'.format(mins, secs)
 		print(timer, end="\r")
-		time.sleep(1)
+		sleep(1)
 		t -= 1
 
 def clock():
@@ -51,7 +50,7 @@ def clock():
 system("clear")
 
 
-parser = argparse.ArgumentParser()
+parser = ArgumentParser()
 parser.add_argument('-C','--camera', help='0 for back Camera, 1 for front Camera', type=str, default=0)
 parser.add_argument('-v','-V','--video', help='1 to convert photos to video file and 0 for dont convert', type=int, default=0)
 parser.add_argument('-sms', '--sms', help='Enter phone number to send sms (by this format : +98...)')
