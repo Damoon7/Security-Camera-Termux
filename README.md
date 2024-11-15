@@ -13,6 +13,7 @@ It also can do these:
 *Tip: All token pictures and the converted video save in a separate folder named the current date and time.
 
 
+
 ## Installation
 
 At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). I suggest you to install it from github or FDroid.
@@ -40,6 +41,7 @@ at last install numpy package:
 ```bash
 pkg install python-numpy
 ```
+
 
 
 ## Execution
