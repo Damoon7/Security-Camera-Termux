@@ -1,6 +1,6 @@
 # Security Camera by Termux
 
-This is a python script that by running it on termux app in an Android phone you can use your phone as a security camera.
+This is a python script that by running it on Termux app in an Android phone you can use your phone as a security camera.
 
 It regularly takes pictures of the desired place and if an external object enters, it starts to take pictures over and over and save them in the phone memory.
 
