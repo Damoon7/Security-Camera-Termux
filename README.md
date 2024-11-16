@@ -18,7 +18,7 @@ It also can do these:
 
 At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). I suggest you to install it from github or FDroid.
 
-After you must install requirements. at first run these:
+After you must install requirements. at first open Termux and run this:
 
 ```bash
 apt update && apt upgrade -y
