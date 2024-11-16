@@ -53,8 +53,8 @@ system("clear")
 parser = ArgumentParser()
 parser.add_argument('-C','--camera', help='0 for back Camera, 1 for front Camera', type=str, default=0)
 parser.add_argument('-v','-V','--video', help='1 to convert photos to video file and 0 for dont convert', type=int, default=0)
-parser.add_argument('-sms', '--sms', help='Enter phone number to send sms (by this format : +98...)')
-parser.add_argument('-c','--call', help='Enter phone number to call (by this format : +98...)')
+parser.add_argument('-sms', '--sms', help='Enter phone number to send sms')
+parser.add_argument('-c','--call', help='Enter phone number to call')
 parser.add_argument('-n','--number', help='number of photos you want to be captured', type=int, default=50)
 parser.add_argument('-s','--seconds', help='Seconds needs to set the device', type=int, default=30)
 parser.add_argument('-ch','--chatid', help='your chat id', type=str)
@@ -90,8 +90,9 @@ while True:
 		print('\nAn External Object Detected')
 		if args.sms is not None:
 			system("termux-sms-send -n " + args.sms + " An External Object Detected")
-			print("\nmessage sent to your phone")
+			print(f"\nmessage sent to {args.sms}")
 		if args.call is not None:
+			print(f"Calling {args.call}\n")
 			system("termux-telephony-call "+args.call)
 		print("\nIt's taking Photos")
 		for i in range(args.number):
@@ -102,7 +103,7 @@ while True:
 		if args.video==1:
 			print('\nConverting photos to video..')
 			system("ffmpeg -framerate 3 -pattern_type glob -i '" + now + "/*.jpeg' -c:v libx264 -pix_fmt yuv420p " + now + "/" + now + ".mp4 > /dev/null 2>&1")
-			print("\nVideo file " + now + ".mp4 created in " + now + "/ folder.")
+			print(f"\nVideo file {now}.mp4 created in {now}/ folder.\n")
 		if args.chatid is not None and args.bottoken is not None:
 			i=1
 			for x in os.listdir(now+"/"):
