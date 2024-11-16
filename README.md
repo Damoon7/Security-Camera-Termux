@@ -62,8 +62,8 @@ you have some options to run this code:
 
 1. -C or --camera : 0 for back Camera, 1 for front Camera, default is 0.
 2. -v, -V or --video : 1 to convert photos to video file and 0 to dont convert, (default is 0)
-3. -sms or --sms Your_Phone_Number (replace Your_Phone_Number by your phone number with zip code like: +98...)
-4. -c or --call Your_Phone_Number (replace Your_Phone_Number by your phone number with zip code like: +98...)
+3. -sms or --sms Your_Phone_Number (replace Your_Phone_Number by your phone number)
+4. -c or --call Your_Phone_Number (replace Your_Phone_Number by your phone number)
 5. -n or --number 50 : number of photos you want to be captured (replace 50 by what number you want, default is 50)
 6. -s or --seconds 30 : Seconds you need to set the device (default is 30)
 7. -ch --chatid Chat_ID : replace Chat_ID by your telegram chat ID
