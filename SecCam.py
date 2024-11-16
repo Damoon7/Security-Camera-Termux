@@ -56,7 +56,7 @@ parser.add_argument('-v','-V','--video', help='1 to convert photos to video file
 parser.add_argument('-sms', '--sms', help='Enter phone number to send sms')
 parser.add_argument('-c','--call', help='Enter phone number to call')
 parser.add_argument('-n','--number', help='number of photos you want to be captured', type=int, default=50)
-parser.add_argument('-s','--seconds', help='Seconds needs to set the device', type=int, default=30)
+parser.add_argument('-s','--seconds', help='Seconds needs to set the device', type=int, default=60)
 parser.add_argument('-ch','--chatid', help='your chat id', type=str)
 parser.add_argument('-bt','--bottoken', help='your telegram bot token', type=str)
 args = parser.parse_args()
