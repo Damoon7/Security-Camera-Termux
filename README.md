@@ -65,7 +65,7 @@ you have some options to run this code:
 3. -sms or --sms Your_Phone_Number (replace Your_Phone_Number by your phone number)
 4. -c or --call Your_Phone_Number (replace Your_Phone_Number by your phone number)
 5. -n or --number 50 : number of photos you want to be captured (replace 50 by what number you want, default is 50)
-6. -s or --seconds 30 : Seconds you need to set the device (default is 30)
+6. -s or --seconds 60 : Seconds you need to set the device (default is 60)
 7. -ch --chatid Chat_ID : replace Chat_ID by your telegram chat ID
 8. -bt or --bottoken  Bot_Token : replace Bot_Token by your telegram bot token
 
