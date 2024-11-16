@@ -24,7 +24,7 @@ After you must install requirements. at first open Termux and run this:
 apt update && apt upgrade -y
 ```
 
-then you should install  python and some packages on termux that you need to run this script:
+then you should install  python and some packages on Termux that you need to run this script:
 
 
 ```bash
