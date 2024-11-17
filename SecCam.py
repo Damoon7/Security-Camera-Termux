@@ -3,7 +3,7 @@ import numpy as np
 from os import listdir
 from datetime import datetime
 from argparse import ArgumentParser
-from time import sleep, time
+from time import sleep, time, ctime
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 
 
@@ -119,10 +119,7 @@ while True:
 			processCommand("termux-camera-photo -c " + args.camera + " "+now+".jpeg",True, PIPE, PIPE, "Can\'t take photo")
 		end=time()
 		delTime=end-start
-		print(delTime)
-		print(type(delTime))
 		fr=round(0.3*delTime/args.number,1)
-		print(fr)
 		processCommand("termux-microphone-record -q",True,DEVNULL, STDOUT, "Can\'t stop audio recorder!")
 		processCommand("mkdir " + now,True,DEVNULL, STDOUT, "Can\'t make the folder")
 		processCommand("mv " + now[:2] + "*.jpeg " + now + "/",True, DEVNULL, STDOUT, "Can\'t move files to target folder")
