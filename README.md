@@ -2,11 +2,11 @@
 
 This is a python script that by running it on Termux app in an Android phone you can use your phone as a security camera.
 
-It regularly takes pictures of the desired place and if an external object enters, it starts to take pictures over and over and save them to phone memory.
+It regularly takes pictures of the desired place and if an external object enters, it starts to take pictures over and over, recording audio and save them to phone memory.
 
 It also can do these:
 - Send message to your phone when detects an external object.
-- Convert all taken pictures to a video file.
+- Convert all taken pictures and recorded audio to a video file.
 - Call you, to alarm you
 - Send all taken pictures to your telegram
 
