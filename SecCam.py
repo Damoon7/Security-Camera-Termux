@@ -1,10 +1,9 @@
-
 from PIL import Image, ImageChops
 import numpy as np
 from os import listdir
 from datetime import datetime
 from argparse import ArgumentParser
-from time import sleep
+from time import sleep, time, ctime
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 
 
@@ -12,30 +11,15 @@ def dif_of_images(image1, image2):
     return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))
 
 def setup_num():
-	try:
-		process = Popen(["termux-camera-photo","-c", args.camera, "001.jpeg"], stdout=PIPE, stderr=PIPE)
-		stdout, stderr = process.communicate()
-	except Exception:
-		print(stderr)
-		pass
+	processCommand("termux-camera-photo -c " + args.camera + " 001.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 	sleep(1)
-	try:
-		process = Popen(["termux-camera-photo","-c", args.camera, "002.jpeg"], stdout=PIPE, stderr=PIPE)
-		stdout, stderr = process.communicate()
-	except Exception:
-		print(stderr)
-		pass
+	processCommand("termux-camera-photo -c " + args.camera + " 002.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
 	img1=img1.resize((872,1160))
 	img2=img2.resize((872,1160))
 	delta1=dif_of_images(img1, img2)
-	try:
-		process = Popen(["termux-camera-photo","-c", args.camera, "003.jpeg"], stdout=PIPE, stderr=PIPE)
-		stdout, stderr = process.communicate()
-	except Exception:
-		print(stderr)
-		pass
+	processCommand("termux-camera-photo -c " + args.camera + " 003.jpeg",True,PIPE,PIPE, "Can\'t take photo")
 	img3 = Image.open('003.jpeg')
 	img3=img3.resize((872,1160))
 	delta2=dif_of_images(img2, img3)
@@ -47,12 +31,25 @@ def setup_num():
 	return delta
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
-	try:
-		process = Popen("curl -X POST -H \"Content-Type:multipart/form-data\" -F chat_id="+Chat_ID+" -F photo=@\""+path+"/"+image+"\" https://api.telegram.org/bot"+Bot_Token+"/sendPhoto",shell=True, stdout=DEVNULL, stderr=STDOUT)
-		stdout, stderr = process.communicate()
-	except Exception:
-		print('Something went wrong!')
-		pass
+	processCommand("curl -X POST -H \"Content-Type:multipart/form-data\" -F chat_id="+Chat_ID+" -F photo=@\""+path+"/"+image+"\" https://api.telegram.org/bot"+Bot_Token+"/sendPhoto",True,DEVNULL, STDOUT, "Can\'t send to telegram")
+
+
+
+def processCommand(command, shellVal, stout ,sterr, err):
+	if shellVal:
+		try:
+			process = Popen(command, shell=shellVal, stdout=stout, stderr=sterr)
+			stdout, stderr = process.communicate()
+		except Exception:
+			print(err)
+			pass
+	else:
+		try:
+			process = Popen(command, stdout=stout, stderr=sterr)
+			stdout, stderr = process.communicate()
+		except Exception:
+			print(err)
+			pass
 
 
 
@@ -97,12 +94,7 @@ count=1
 while True:
 	if count>3:
 		count-=2
-	try:
-		process=Popen("termux-camera-photo -c " + args.camera + " 00" + str(count) + ".jpeg", shell=True, stdout=PIPE, stderr=PIPE)
-		stdout, stderr = process.communicate()
-	except Exception:
-		print(stderr)
-		pass
+	processCommand("termux-camera-photo -c " + args.camera + " 00" + str(count) + ".jpeg",True, PIPE, PIPE, "Can\'t take photo")
 	count=count+1
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
@@ -113,59 +105,36 @@ while True:
 	if dif>delta:
 		print('\nAn External Object Detected')
 		if args.sms is not None:
-			try:
-				process = Popen("termux-sms-send -n"+ args.sms+"An External Object Detected", shell=True, stdout=PIPE, stderr=PIPE)
-				stdout, stderr = process.communicate()
-			except Exception:
-				print('Can\'t send message to you')
-				pass
+			processCommand("termux-sms-send -n"+ args.sms+"An External Object Detected",True, PIPE, PIPE, "Can\'t send message to you")
 			print(f"\nmessage sent to {args.sms}")
 		if args.call is not None:
 			print(f"\nCalling {args.call}\n")
-			try:
-				process=Popen("termux-telephony-call "+args.call, shell=True, stdout=DEVNULL, stderr=STDOUT)
-				stdout, stderr = process.communicate()
-			except Exception:
-				print('Can\'t call you!')
-				pass
+			processCommand("termux-telephony-call " + args.call,True, DEVNULL, STDOUT, "Can\'t call you")
+		audioName=datetime.now().strftime("%Y-%m-%d_%H%M%S")
+		processCommand("termux-microphone-record -f " + audioName + ".aac -e aac",True,DEVNULL, STDOUT, "Can\'t record audio")
 		print("\nIt's taking Photos")
+		start=time()
 		for i in range(args.number):
 			now=datetime.now().strftime("%Y-%m-%d_%H%M%S")
-			try:
-				process=Popen("termux-camera-photo -c " + args.camera + " "+now+".jpeg", shell=True, stdout=PIPE, stderr=PIPE)
-				stdout, stderr = process.communicate()
-			except Exception:
-				print(stderr)
-				pass
-		try:
-			process=Popen("mkdir " + now, shell=True, stdout=DEVNULL, stderr=STDOUT)
-			stdout, stderr = process.communicate()
-		except Exception:
-			print('Can\'t make folder!')
-			pass
-		try:
-			process=Popen("mv " + now[:2] + "*.jpeg " + now + "/", shell=True, stdout=DEVNULL, stderr=STDOUT)
-			stdout, stderr = process.communicate()
-		except Exception:
-			print('Something went wrong!')
-			pass
+			processCommand("termux-camera-photo -c " + args.camera + " "+now+".jpeg",True, PIPE, PIPE, "Can\'t take photo")
+		end=time()
+		delTime=end-start
+		print(delTime)
+		print(type(delTime))
+		fr=round(0.3*delTime/args.number,1)
+		print(fr)
+		processCommand("termux-microphone-record -q",True,DEVNULL, STDOUT, "Can\'t stop audio recorder!")
+		processCommand("mkdir " + now,True,DEVNULL, STDOUT, "Can\'t make the folder")
+		processCommand("mv " + now[:2] + "*.jpeg " + now + "/",True, DEVNULL, STDOUT, "Can\'t move files to target folder")
 		if args.video==1:
 			print('\nConverting photos to video..')
-			try:
-				process=Popen("ffmpeg -framerate 3 -pattern_type glob -i '" + now + "/*.jpeg' -c:v libx264 -pix_fmt yuv420p " + now + "/" + now + ".mp4 > /dev/null 2>&1", shell=True, stdout=DEVNULL, stderr=STDOUT)
-				stdout, stderr = process.communicate()
-			except Exception:
-				print('Can\'t convert photos to video file!')
-				pass
+			processCommand("ffmpeg -framerate " + str(fr) + " -pattern_type glob -i '" + now + "/*.jpeg' -i " + audioName + ".aac -c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p " + now + ".mp4",True, PIPE, PIPE, "Can\'t convert to video")
+			processCommand("mv "+ now + ".mp4 " + now + "/",True, DEVNULL, STDOUT, "Can\'t move video file  to target folder")
 			print(f"\nVideo file {now}.mp4 created in \n{now}/ folder.\n")
+		processCommand("mv "+ audioName + ".aac " + now + "/",True, DEVNULL, STDOUT, "Can\'t move audio file to target folder")
 		if args.chatid is not None and args.bottoken is not None:
-			try:
-				process=Popen("curl -X POST -H \"Content-Type:multipart/form-data\" -F chat_id="+args.chatid+" -F text=\"An external object detected, here are the photos:\" https://api.telegram.org/bot"+args.bottoken+"/sendMessage > /dev/null 2>&1", shell=True, stdout=DEVNULL, stderr=STDOUT)
-				stdout, stderr = process.communicate()
-			except Exception:
-				print('Can\'t send Text to telegram!')
-				pass
-			print('\nStart to send taken photos to telegram:\n')
+			processCommand("curl -X POST -H \"Content-Type:multipart/form-data\" -F chat_id="+args.chatid+" -F text=\"An external object detected, here are the photos:\" https://api.telegram.org/bot"+args.bottoken+"/sendMessage",True, DEVNULL, STDOUT, "Can\'t send Text to telegram!")
+			print('\nStart sending taken photos to telegram:\n')
 			i=1
 			for x in listdir(now+"/"):
 				if x.endswith(".jpeg"):
