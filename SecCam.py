@@ -3,7 +3,7 @@ import numpy as np
 from os import listdir
 from datetime import datetime
 from argparse import ArgumentParser
-from time import sleep, time, ctime
+from time import sleep, time
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 
 
