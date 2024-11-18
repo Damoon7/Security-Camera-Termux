@@ -24,7 +24,7 @@ Now open Termux and run this command:
 apt update && apt upgrade -y
 ```
 
-After you must install [Termux-Api](https://wiki.termux.com/wiki/Termux:API) from [FDroid](https://f-droid.org/packages/com.termux.api/) of from [Github](https://github.com/termux/termux-api).
+After you must install [Termux-Api](https://wiki.termux.com/wiki/Termux:API) from [FDroid](https://f-droid.org/packages/com.termux.api/) or [Github](https://github.com/termux/termux-api).
 
 Then to be able to use it in Termux run this:
 
