@@ -16,7 +16,7 @@ It also can do these:
 
 ## Installation
 
-At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). Because you have to install Termux-Api and Google play doesn't support it so don't install from Google play.
+At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). Because you have to install Termux-Api and Google play doesn't support it so don't install it from Google play.
 
 Now open Termux and run this command:
 
