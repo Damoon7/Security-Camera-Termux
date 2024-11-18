@@ -16,27 +16,36 @@ It also can do these:
 
 ## Installation
 
-At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). I suggest you to install it from github or FDroid.
+At first you should install [Termux](https://github.com/termux/termux-app) app from [Google Play](https://play.google.com/store/apps/details?id=com.termux), [FDroid](https://f-droid.org/packages/com.termux/) or [Github](https://github.com/termux/termux-app/releases). Because you have to install Termux-Api and Google play doesn't support it so don't install from Google play.
 
-After you must install requirements. at first open Termux and run this:
+Now open Termux and run this command:
 
 ```bash
 apt update && apt upgrade -y
 ```
 
-then you should install  python and some packages on Termux that you need to run this script:
+After you must install [Termux-Api](https://wiki.termux.com/wiki/Termux:API) from [FDroid](https://f-droid.org/packages/com.termux.api/) of from [Github](https://github.com/termux/termux-api).
+
+Then to be able to use it in Termux run this:
+
+```bash
+pkg install termux-api
+```
+
+After you have to install python and some packages on Termux that you need to run this script:
 
 
 ```bash
 apt install python make wget termux-exec clang libjpeg-turbo freetype -y
 ```
-and install Pillow package:
+
+And install Pillow package:
 
 ```bash
 env INCLUDE="$PREFIX/include" LDFLAGS=" -lm" pip install Pillow
 ```
 
-at last install numpy package:
+At last install numpy package:
 
 ```bash
 pkg install python-numpy
@@ -46,19 +55,19 @@ pkg install python-numpy
 
 ## Execution
 
-for executing this script you can run this command that uses default options:
+For executing this script you can run this command that uses default options:
 
 ```bash
 python3 SecCam.py
 ```
 
-help command is:
+Help command is:
 
 ```bash
 python3 SecCam.py -h
 ```
 
-you have some options to run this code:
+You have some options to run this code:
 
 1. -C or --camera : 0 for back Camera, 1 for front Camera, default is 0.
 2. -v, -V or --video : 1 to convert photos to video file and 0 to dont convert, (default is 0)
