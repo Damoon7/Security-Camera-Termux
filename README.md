@@ -10,7 +10,7 @@ It also can do these:
 - Call you, to alarm you
 - Send all taken pictures to your telegram
 
-*Tip: All token pictures and the converted video save in a separate folder named the current date and time.
+*Tip: All token pictures, recorded audio and the converted video save in a separate folder named the current date and time.
 
 
 
