@@ -36,7 +36,7 @@ After you have to install python and some packages on Termux that you need to ru
 
 
 ```bash
-apt install python make wget termux-exec clang libjpeg-turbo freetype -y
+apt install python make wget termux-exec clang libjpeg-turbo freetype ffmpeg -y
 ```
 
 And install Pillow package:
