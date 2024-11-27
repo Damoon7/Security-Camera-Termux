@@ -3,32 +3,34 @@ import numpy as np
 from os import listdir
 from datetime import datetime
 from argparse import ArgumentParser
-from time import sleep, time, ctime
+from time import sleep, time
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 
 
 def dif_of_images(image1, image2):
     return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))
 
+
 def setup_num():
-	processCommand("termux-camera-photo -c " + args.camera + " 001.jpeg",True,PIPE,PIPE,"Can\'t take photo")
+	processCommand("termux-camera-photo -c " + str(args.camera) + " 001.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 	sleep(1)
-	processCommand("termux-camera-photo -c " + args.camera + " 002.jpeg",True,PIPE,PIPE,"Can\'t take photo")
+	processCommand("termux-camera-photo -c " + str(args.camera) + " 002.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
-	img1=img1.resize((872,1160))
-	img2=img2.resize((872,1160))
-	delta1=dif_of_images(img1, img2)
-	processCommand("termux-camera-photo -c " + args.camera + " 003.jpeg",True,PIPE,PIPE, "Can\'t take photo")
+	img1=img1.resize((872,1160)).convert('L')
+	img2=img2.resize((872,1160)).convert('L')
+	del1=dif_of_images(img1, img2)
+	processCommand("termux-camera-photo -c " + str(args.camera) + " 003.jpeg",True,PIPE,PIPE, "Can\'t take photo")
 	img3 = Image.open('003.jpeg')
-	img3=img3.resize((872,1160))
-	delta2=dif_of_images(img2, img3)
+	img3=img3.resize((872,1160)).convert('L')
+	del2=dif_of_images(img2, img3)
+	del3=dif_of_images(img1, img3)
+	max=max(del1, del2, del3)
+	min=min(del1, del2, del3)
 	print('Device is set up')
-	if delta2>delta1:
-		delta=delta2*1.25-delta1/4
-	else:
-		delta=delta1*1.25-delta2/4
-	return delta
+	sens=5  # sesitivity of detector
+	return max+abs(max-min)/sens
+
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
 	processCommand("curl -X POST -H \"Content-Type:multipart/form-data\" -F chat_id="+Chat_ID+" -F photo=@\""+path+"/"+image+"\" https://api.telegram.org/bot"+Bot_Token+"/sendPhoto",True,DEVNULL, STDOUT, "Can\'t send to telegram")
@@ -61,13 +63,17 @@ def countdown(t):
 		sleep(1)
 		t -= 1
 
+
 def clock():
 	cl=datetime.now().strftime("%H:%M:%S")
 	print(cl, end="\r")
 
+
+# Clear the screen
 process=run("clear", shell=True)
 
 
+# Arguments:
 parser = ArgumentParser()
 parser.add_argument('-C','--camera', help='0 for back Camera, 1 for front Camera', type=str, default=0)
 parser.add_argument('-v','-V','--video', help='1 to convert photos to video file and 0 for dont convert', type=int, default=0)
@@ -94,12 +100,12 @@ count=1
 while True:
 	if count>3:
 		count-=2
-	processCommand("termux-camera-photo -c " + args.camera + " 00" + str(count) + ".jpeg",True, PIPE, PIPE, "Can\'t take photo")
+	processCommand("termux-camera-photo -c " + str(args.camera) + " 00" + str(count) + ".jpeg",True, PIPE, PIPE, "Can\'t take photo")
 	count=count+1
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
-	img1=img1.resize((872,1160))
-	img2=img2.resize((872,1160))
+	img1=img1.resize((872,1160)).convert('L')
+	img2=img2.resize((872,1160)).convert('L')
 	dif=dif_of_images(img1, img2)
 	clock()
 	if dif>delta:
@@ -116,7 +122,7 @@ while True:
 		start=time()
 		for i in range(args.number):
 			now=datetime.now().strftime("%Y-%m-%d_%H%M%S")
-			processCommand("termux-camera-photo -c " + args.camera + " "+now+".jpeg",True, PIPE, PIPE, "Can\'t take photo")
+			processCommand("termux-camera-photo -c " + str(args.camera) + " "+now+".jpeg",True, PIPE, PIPE, "Can\'t take photo")
 		end=time()
 		delTime=end-start
 		fr=round(0.3*delTime/args.number,1)
