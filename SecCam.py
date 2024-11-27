@@ -1,3 +1,4 @@
+#!/usr/bin/python
 from PIL import Image, ImageChops
 import numpy as np
 from os import listdir
