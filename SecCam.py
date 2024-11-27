@@ -13,24 +13,26 @@ def dif_of_images(image1, image2):
 
 
 def setup_num():
-	processCommand("termux-camera-photo -c " + str(args.camera) + " 001.jpeg",True,PIPE,PIPE,"Can\'t take photo")
-	sleep(1)
-	processCommand("termux-camera-photo -c " + str(args.camera) + " 002.jpeg",True,PIPE,PIPE,"Can\'t take photo")
-	img1 = Image.open('001.jpeg')
-	img2 = Image.open('002.jpeg')
-	img1=img1.resize((872,1160)).convert('L')
-	img2=img2.resize((872,1160)).convert('L')
-	del1=dif_of_images(img1, img2)
-	processCommand("termux-camera-photo -c " + str(args.camera) + " 003.jpeg",True,PIPE,PIPE, "Can\'t take photo")
-	img3 = Image.open('003.jpeg')
-	img3=img3.resize((872,1160)).convert('L')
-	del2=dif_of_images(img2, img3)
-	del3=dif_of_images(img1, img3)
-	max=max(del1, del2, del3)
-	min=min(del1, del2, del3)
+	imgArray=[]
+	for i in range(0,15):
+		processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
+		sleep(1)
+		img = Image.open('img_set.jpeg')
+		img=img.resize((436,580)).convert('L')
+		imgArray.append(img)
+	maxdel = 0
+	mindel = 2**30
+	for x in range(0,len(imgArray)):
+		for y in range(0,len(imgArray)):
+			if x!=y :
+				delta=dif_of_images(imgArray[x], imgArray[y])
+				if delta > maxdel :
+					maxdel = delta
+				elif delta < mindel :
+					mindel = delta
 	print('Device is set up')
-	sens=5  # sesitivity of detector
-	return max+abs(max-min)/sens
+	sens=3  # sesitivity of detector
+	return maxdel+abs(maxdel-mindel)/sens
 
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
@@ -97,6 +99,7 @@ print('Setting up the device...\n')
 
 delta=setup_num()
 
+processCommand("termux-camera-photo -c " + str(args.camera) + " 002.jpeg",True, PIPE, PIPE, "Can\'t take photo")
 count=1
 while True:
 	if count>3:
@@ -105,8 +108,8 @@ while True:
 	count=count+1
 	img1 = Image.open('001.jpeg')
 	img2 = Image.open('002.jpeg')
-	img1=img1.resize((872,1160)).convert('L')
-	img2=img2.resize((872,1160)).convert('L')
+	img1=img1.resize((436,580)).convert('L')
+	img2=img2.resize((436,580)).convert('L')
 	dif=dif_of_images(img1, img2)
 	clock()
 	if dif>delta:
