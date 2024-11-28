@@ -1,7 +1,7 @@
 #!/usr/bin/python
 from PIL import Image, ImageChops
 import numpy as np
-from os import listdir
+from os import listdir, remove
 from datetime import datetime
 from argparse import ArgumentParser
 from time import sleep, time
@@ -30,6 +30,7 @@ def setup_num():
 					maxdel = delta
 				elif delta < mindel :
 					mindel = delta
+	remove("img_set.jpeg")
 	print('Device is set up')
 	sens=3  # sesitivity of detector
 	return maxdel+abs(maxdel-mindel)/sens
@@ -99,18 +100,19 @@ print('Setting up the device...\n')
 
 delta=setup_num()
 
-processCommand("termux-camera-photo -c " + str(args.camera) + " 002.jpeg",True, PIPE, PIPE, "Can\'t take photo")
-count=1
+imgArr=[]
+
 while True:
-	if count>3:
-		count-=2
-	processCommand("termux-camera-photo -c " + str(args.camera) + " 00" + str(count) + ".jpeg",True, PIPE, PIPE, "Can\'t take photo")
-	count=count+1
-	img1 = Image.open('001.jpeg')
-	img2 = Image.open('002.jpeg')
-	img1=img1.resize((436,580)).convert('L')
-	img2=img2.resize((436,580)).convert('L')
-	dif=dif_of_images(img1, img2)
+	for i in range(0,2):
+		processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
+		img = Image.open('photo.jpeg')
+		img=img.resize((436,580)).convert('L')
+		imgArr.append(img)
+		remove("photo.jpeg")
+		sleep(1)
+	dif=dif_of_images(imgArr[0], imgArr[1])
+	imgArr.pop(0)
+	imgArr.pop(0)
 	clock()
 	if dif>delta:
 		print('\nAn External Object Detected')
