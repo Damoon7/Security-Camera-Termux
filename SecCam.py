@@ -14,7 +14,7 @@ def dif_of_images(image1, image2):
 
 def setup_num():
 	imgArray=[]
-	for i in range(0,15):
+	for i in range(0,17):
 		processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 		sleep(1)
 		img = Image.open('img_set.jpeg')
