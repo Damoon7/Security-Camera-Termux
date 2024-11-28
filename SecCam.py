@@ -101,18 +101,22 @@ print('Setting up the device...\n')
 delta=setup_num()
 
 imgArr=[]
+processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
+img = Image.open('photo.jpeg')
+img=img.resize((436,580)).convert('L')
+imgArr.append(img)
+remove("photo.jpeg")
+sleep(1)
 
 while True:
-	for i in range(0,2):
-		processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
-		img = Image.open('photo.jpeg')
-		img=img.resize((436,580)).convert('L')
-		imgArr.append(img)
-		remove("photo.jpeg")
-		sleep(1)
+	processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
+	img = Image.open('photo.jpeg')
+	img=img.resize((436,580)).convert('L')
+	imgArr.append(img)
+	remove("photo.jpeg")
 	dif=dif_of_images(imgArr[0], imgArr[1])
 	imgArr.pop(0)
-	imgArr.pop(0)
+	sleep(1)
 	clock()
 	if dif>delta:
 		print('\nAn External Object Detected')
