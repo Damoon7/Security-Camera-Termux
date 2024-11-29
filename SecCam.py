@@ -6,6 +6,7 @@ from datetime import datetime
 from argparse import ArgumentParser
 from time import sleep, time
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
+from statistics import stdev, mean
 
 
 def dif_of_images(image1, image2):
@@ -13,8 +14,9 @@ def dif_of_images(image1, image2):
 
 
 def setup_num():
-	imgArray=[]
-	for i in range(0,17):
+	imgArray = []
+	delta = []
+	for i in range(0,20):
 		processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 		sleep(1)
 		img = Image.open('img_set.jpeg')
@@ -25,15 +27,15 @@ def setup_num():
 	for x in range(0,len(imgArray)):
 		for y in range(0,len(imgArray)):
 			if x!=y :
-				delta=dif_of_images(imgArray[x], imgArray[y])
-				if delta > maxdel :
-					maxdel = delta
-				elif delta < mindel :
-					mindel = delta
+				delta.append(dif_of_images(imgArray[x], imgArray[y])*(10**-3))
+	maxdel = max(delta)
+	std = stdev(delta)
+	avg = mean(delta)
 	remove("img_set.jpeg")
 	print('Device is set up')
-	sens=3  # sesitivity of detector
-	return maxdel+abs(maxdel-mindel)/sens
+	imgArray.clear()
+	delta.clear()
+	return maxdel*(1+std/avg)*10**3
 
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
