@@ -7,6 +7,7 @@ from argparse import ArgumentParser
 from time import sleep, time
 from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 from statistics import stdev, mean
+from random import randint
 
 
 def dif_of_images(image1, image2):
@@ -21,10 +22,10 @@ def setup_num():
 		delta = []
 		for i in range(0,25):
 			processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
-			sleep(1)
 			img = Image.open('img_set.jpeg')
 			img=img.resize((225,300)).convert('L')
 			imgArray.append(img)
+			sleep(randint(1,5))
 		maxdel = 0
 		for x in range(0,len(imgArray)):
 			for y in range(0,len(imgArray)):
@@ -62,7 +63,6 @@ def processCommand(command, shellVal, stout ,sterr, err):
 			pass
 
 
-
 def countdown(t):
 	while t:
 		mins, secs = divmod(t, 60)
@@ -75,7 +75,6 @@ def countdown(t):
 def clock():
 	cl=datetime.now().strftime("%H:%M:%S")
 	print(cl, end="\r")
-
 
 
 # Arguments:
@@ -92,16 +91,12 @@ args = parser.parse_args()
 
 
 
-
+#   ***  Main Code:   ***
 
 process=run("clear", shell=True) # Clear the screen
-
 process=run("termux-wake-lock", shell=True) # to wake up Termux while phone is locked
-
 countdown(args.seconds)
-
 print('Setting up the device...\n')
-
 delta=setup_num()
 
 imgArr=[]
@@ -160,6 +155,6 @@ while True:
 					print(st,end="\r")
 					i+=1
 			print("\nAll your photos sent to your telegram bot\n")
-		countdown(3)
+		countdown(5)
 		print('\nAgain Setting up the device..')
 		delta=setup_num()
