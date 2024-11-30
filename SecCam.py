@@ -10,32 +10,34 @@ from statistics import stdev, mean
 
 
 def dif_of_images(image1, image2):
-    return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))
+    return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))*10**-3
 
 
 def setup_num():
-	imgArray = []
-	delta = []
-	for i in range(0,20):
-		processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
-		sleep(1)
-		img = Image.open('img_set.jpeg')
-		img=img.resize((436,580)).convert('L')
-		imgArray.append(img)
-	maxdel = 0
-	mindel = 2**30
-	for x in range(0,len(imgArray)):
-		for y in range(0,len(imgArray)):
-			if x!=y :
-				delta.append(dif_of_images(imgArray[x], imgArray[y])*(10**-3))
-	maxdel = max(delta)
-	std = stdev(delta)
-	avg = mean(delta)
-	remove("img_set.jpeg")
+	std=1
+	avg=0
+	while std > avg * 0.65:
+		imgArray = []
+		delta = []
+		for i in range(0,25):
+			processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
+			sleep(1)
+			img = Image.open('img_set.jpeg')
+			img=img.resize((225,300)).convert('L')
+			imgArray.append(img)
+		maxdel = 0
+		for x in range(0,len(imgArray)):
+			for y in range(0,len(imgArray)):
+				if x!=y :
+					delta.append(dif_of_images(imgArray[x], imgArray[y]))
+		maxdel = max(delta)
+		std = stdev(delta)
+		avg = mean(delta)
+		remove("img_set.jpeg")
+		imgArray.clear()
+		delta.clear()
 	print('Device is set up')
-	imgArray.clear()
-	delta.clear()
-	return maxdel*(1+std/avg)*10**3
+	return maxdel + avg
 
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
@@ -75,9 +77,6 @@ def clock():
 	print(cl, end="\r")
 
 
-# Clear the screen
-process=run("clear", shell=True)
-
 
 # Arguments:
 parser = ArgumentParser()
@@ -93,8 +92,11 @@ args = parser.parse_args()
 
 
 
-# to wake up Termux while phone is locked:
-process=run("termux-wake-lock", shell=True)
+
+
+process=run("clear", shell=True) # Clear the screen
+
+process=run("termux-wake-lock", shell=True) # to wake up Termux while phone is locked
 
 countdown(args.seconds)
 
@@ -105,21 +107,21 @@ delta=setup_num()
 imgArr=[]
 processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
 img = Image.open('photo.jpeg')
-img=img.resize((436,580)).convert('L')
+img=img.resize((225,300)).convert('L')
 imgArr.append(img)
 remove("photo.jpeg")
-sleep(1)
+sleep(2)
 
 while True:
+	clock()
 	processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
 	img = Image.open('photo.jpeg')
-	img=img.resize((436,580)).convert('L')
+	img=img.resize((225,300)).convert('L')
 	imgArr.append(img)
 	remove("photo.jpeg")
 	dif=dif_of_images(imgArr[0], imgArr[1])
 	imgArr.pop(0)
-	sleep(1)
-	clock()
+	sleep(2)
 	if dif>delta:
 		print('\nAn External Object Detected')
 		if args.sms is not None:
