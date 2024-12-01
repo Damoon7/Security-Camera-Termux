@@ -20,25 +20,28 @@ def setup_num():
 	while std > avg * 0.65:
 		imgArray = []
 		delta = []
-		for i in range(0,25):
-			processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
-			img = Image.open('img_set.jpeg')
-			img=img.resize((225,300)).convert('L')
-			imgArray.append(img)
-			sleep(randint(1,5))
 		maxdel = 0
-		for x in range(0,len(imgArray)):
-			for y in range(0,len(imgArray)):
-				if x!=y :
-					delta.append(dif_of_images(imgArray[x], imgArray[y]))
-		maxdel = max(delta)
-		std = stdev(delta)
-		avg = mean(delta)
+		while len(imgArray) < 20 or maxdel/(avg+std) < 1.43 :
+			for i in range(0,5) :
+				processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
+				img = Image.open('img_set.jpeg')
+				img=img.resize((225,300)).convert('L')
+				imgArray.append(img)
+				sleep(randint(1,5))
+			for x in range(0,len(imgArray)):
+				for y in range(0,len(imgArray)):
+					if x!=y :
+						delta.append(dif_of_images(imgArray[x], imgArray[y]))
+			maxdel = max(delta)
+			std = stdev(delta)
+			avg = mean(delta)
+			if len(imgArray)>=40:
+				break
 		remove("img_set.jpeg")
 		imgArray.clear()
 		delta.clear()
 	print('Device is set up')
-	return maxdel + avg
+	return maxdel + avg + std
 
 
 def send_photo_to_telegram(Chat_ID, Bot_Token,path, image):
