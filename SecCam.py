@@ -21,7 +21,7 @@ def setup_num():
 		imgArray = []
 		delta = []
 		maxdel = 0
-		while len(imgArray) < 20 or maxdel/(avg+std) < 1.43 :
+		while len(imgArray) < 15 or maxdel/(avg+std) < 1.43 :
 			for i in range(0,5) :
 				processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 				img = Image.open('img_set.jpeg')
@@ -29,13 +29,12 @@ def setup_num():
 				imgArray.append(img)
 				sleep(randint(1,5))
 			for x in range(0,len(imgArray)):
-				for y in range(0,len(imgArray)):
-					if x!=y :
-						delta.append(dif_of_images(imgArray[x], imgArray[y]))
+				for y in range(x+1,len(imgArray)):
+					delta.append(dif_of_images(imgArray[x], imgArray[y]))
 			maxdel = max(delta)
 			std = stdev(delta)
 			avg = mean(delta)
-			if len(imgArray)>=40:
+			if len(imgArray)>=25:
 				break
 		remove("img_set.jpeg")
 		imgArray.clear()
@@ -103,24 +102,30 @@ print('Setting up the device...\n')
 delta=setup_num()
 
 imgArr=[]
-processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
-img = Image.open('photo.jpeg')
-img=img.resize((225,300)).convert('L')
-imgArr.append(img)
-remove("photo.jpeg")
-sleep(2)
-
-while True:
-	clock()
+for k in range(0,3):
 	processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
 	img = Image.open('photo.jpeg')
 	img=img.resize((225,300)).convert('L')
 	imgArr.append(img)
 	remove("photo.jpeg")
-	dif=dif_of_images(imgArr[0], imgArr[1])
-	imgArr.pop(0)
 	sleep(2)
-	if dif>delta:
+
+while True:
+	clock()
+	dif = []
+	processCommand("termux-camera-photo -c " + str(args.camera) + " photo.jpeg",True, PIPE, PIPE, "Can\'t take photo")
+	img = Image.open('photo.jpeg')
+	img=img.resize((225,300)).convert('L')
+	imgArr.append(img)
+	remove("photo.jpeg")
+	for x in range(0,len(imgArr)):
+		for y in range(x+1,len(imgArr)):
+			dif.append(dif_of_images(imgArr[x], imgArr[y]))
+	imgArr.pop(0)
+	isLarge=[]
+	for z in dif:
+		isLarge.append(z>delta)
+	if all(isLarge) :
 		print('\nAn External Object Detected')
 		if args.sms is not None:
 			processCommand("termux-sms-send -n"+ args.sms+"An External Object Detected",True, PIPE, PIPE, "Can\'t send message to you")
@@ -161,3 +166,4 @@ while True:
 		countdown(5)
 		print('\nAgain Setting up the device..')
 		delta=setup_num()
+	sleep(2)
