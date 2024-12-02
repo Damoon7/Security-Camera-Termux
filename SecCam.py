@@ -17,11 +17,11 @@ def dif_of_images(image1, image2):
 def setup_num():
 	std=1
 	avg=0
-	while std > avg * 0.65:
+	while std > avg * 0.2:
 		imgArray = []
 		delta = []
 		maxdel = 0
-		while len(imgArray) < 15 or maxdel/(avg+std) < 1.43 :
+		while len(imgArray) < 15 or maxdel/(avg+std) < 1.25 :
 			for i in range(0,5) :
 				processCommand("termux-camera-photo -c " + str(args.camera) + " img_set.jpeg",True,PIPE,PIPE,"Can\'t take photo")
 				img = Image.open('img_set.jpeg')
