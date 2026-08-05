@@ -36,7 +36,7 @@ After you have to install python and some packages on Termux that you need to ru
 
 
 ```bash
-apt install python make wget termux-exec clang libjpeg-turbo freetype ffmpeg -y
+apt install curl python make wget termux-exec clang libjpeg-turbo freetype ffmpeg -y
 ```
 
 And install Pillow package:
@@ -45,17 +45,22 @@ And install Pillow package:
 env INCLUDE="$PREFIX/include" LDFLAGS=" -lm" pip install Pillow
 ```
 
-At last install numpy package:
+Finally install numpy package:
 
 ```bash
 pkg install python-numpy
 ```
 
 
-
 ## Execution
 
-For executing this script you can run this command that uses default options:
+At first you must download the python script file on your phone:
+
+```bash
+curl -O https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/refs/heads/main/SecCam.py
+```
+
+Then for executing this script you can run this command that uses default options:
 
 ```bash
 python3 SecCam.py
