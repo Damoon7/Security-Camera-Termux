@@ -9,12 +9,9 @@ from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 from statistics import stdev, mean
 from random import randint
 
-
-
 def dif_of_images(image1, image2):
     diff = ImageChops.difference(image1, image2)
     return np.sum(np.asarray(diff)) * 10**-3
-
 
 
 def setup_num():
