@@ -11,7 +11,7 @@ from random import randint
 
 
 def dif_of_images(image1, image2):
-    return np.sum(np.array(ImageChops.difference(image1, image2).get_flattened_data()))*10**-3
+    return np.sum(np.array(ImageChops.difference(image1, image2).getdata()))*10**-3
 
 
 def setup_num():
