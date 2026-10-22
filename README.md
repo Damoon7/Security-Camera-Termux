@@ -82,6 +82,8 @@ python3 SecCam.py -h
 | `-s`, `--seconds` | Initial countdown timer (in seconds) before calibration starts | `30` |
 | `-ch`, `--chatid` | Your numerical Telegram Chat ID | `None` |
 | `-bt`, `--bottoken` | Your Telegram Bot Token | `None` |
+| `-st`, `--sensitivity` | Detection sensitivity percentage (higher = more sensitive) | `100` |
+
 
 > 💡 **Telegram Setup Tip:** 
 > 1. Create a bot via [@BotFather](https://t.me/BotFather) to get your `Bot_Token`, and make sure to press **Start** inside your new bot.
