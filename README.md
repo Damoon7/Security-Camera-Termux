@@ -2,7 +2,7 @@
 
 Turn your old or spare Android phone into a smart, motion-detecting security camera using **Termux** and **Python**.
 
-This script continuously monitors your environment by capturing and comparing frames. Once motion or an external object is detected, it automatically triggers an alarm workflow: capturing high-speed photos, recording ambient audio, و sending real-time alerts.
+This script continuously monitors your environment by capturing and comparing frames. Once motion or an external object is detected, it automatically triggers an alarm workflow: capturing high-speed photos, recording ambient audio, and sending real-time alerts.
 
 ---
 
@@ -41,7 +41,14 @@ pkg update && pkg upgrade -y
 pkg install python python-pillow python-numpy termux-api ffmpeg curl -y
 ```
 
-Download the script directly to your device:
+> 💡 **Alternative Method (if `python-pillow` fails to install via `pkg`):**
+> You can compile and install `Pillow` manually using `pip`:
+> ```bash
+> pkg install clang make libjpeg-turbo freetype -y
+> env INCLUDE="$PREFIX/include" LDFLAGS="-lm" pip install Pillow
+> ```
+
+Next, download the script directly to your device:
 
 ```bash
 curl -O [https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py](https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py)
