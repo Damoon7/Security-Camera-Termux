@@ -9,18 +9,19 @@ from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
 from statistics import stdev, mean
 
 
-def dif_of_images(image1, image2):
+def get_normalized_diff(image1, image2):
     # Convert images to float arrays and normalize brightness to neutralize ambient light changes
     arr1 = np.asarray(image1, dtype=np.float32)
     arr2 = np.asarray(image2, dtype=np.float32)
     arr1 = arr1 - np.mean(arr1)
     arr2 = arr2 - np.mean(arr2)
+    return np.abs(arr1 - arr2)
 
-    # Calculate absolute difference per pixel
-    diff = np.abs(arr1 - arr2)
 
-    # Ignore minor sensor noise (changes < 25) and sum only significant pixel changes
-    significant_changes = np.where(diff > 25, diff, 0)
+def dif_of_images(image1, image2, noise_cutoff=15.0):
+    diff = get_normalized_diff(image1, image2)
+    # Ignore sensor noise below the auto-calibrated cutoff and sum only significant pixel changes
+    significant_changes = np.where(diff > noise_cutoff, diff, 0)
     return int(np.sum(significant_changes))
 
 
@@ -43,9 +44,8 @@ def take_processed_photo(camera_id, filename):
     return processed
 
 
-def setup_num(camera_id, setup_photos=20):
+def setup_num(camera_id, sensitivity=100, setup_photos=20):
     imgArray = []
-    delta = []
     for i in range(setup_photos):
         print(f"Calibrating camera: photo {i+1}/{setup_photos}...", end="\r")
         img = take_processed_photo(camera_id, 'img_set.jpeg')
@@ -53,22 +53,35 @@ def setup_num(camera_id, setup_photos=20):
             imgArray.append(img)
         sleep(1)
 
+    if len(imgArray) < 2:
+        return 10000, 15.0, (imgArray[-1] if imgArray else None)
+
+    # Step 1: Automatically measure pixel-level sensor noise from consecutive calibration frames
+    consecutive_diffs = [get_normalized_diff(imgArray[i], imgArray[i + 1]) for i in range(len(imgArray) - 1)]
+    noise_995 = float(np.percentile(consecutive_diffs, 99.5))
+    noise_cutoff = max(6.0, noise_995 * 1.25)
+
+    # Step 2: Measure frame-to-frame fluctuations across all pairs using the learned noise_cutoff
+    delta = []
     for x in range(len(imgArray)):
         for y in range(x + 1, len(imgArray)):
-            delta.append(dif_of_images(imgArray[x], imgArray[y]))
-
-    if not delta:
-        return 50000, None
+            delta.append(dif_of_images(imgArray[x], imgArray[y], noise_cutoff))
 
     maxdel = max(delta)
     std = stdev(delta) if len(delta) > 1 else 0
     avg = mean(delta)
-    print('\nDevice is set up!                ')
 
-    # Calculate detection threshold with a minimum floor (50000) to prevent false positives
-    raw_threshold = maxdel * (1 + std / avg) if avg > 0 else maxdel + 50000
-    threshold = max(raw_threshold, 50000)
-    return threshold, imgArray[-1]
+    # Step 3: Compute dynamic floor (~0.15% of frame pixels changing above noise_cutoff) and statistical ceiling
+    dynamic_floor = int(350 * noise_cutoff)
+    statistical_bound = int(maxdel + 3 * std + avg)
+    base_threshold = max(statistical_bound, dynamic_floor)
+
+    # Apply optional user sensitivity scaling (default 100% leaves base_threshold unchanged)
+    sensitivity = max(1, sensitivity)
+    threshold = int(base_threshold * (100.0 / sensitivity))
+
+    print(f"\nDevice is set up! (Noise cutoff: {noise_cutoff:.1f} | Threshold: {threshold:,})")
+    return threshold, noise_cutoff, imgArray[-1]
 
 
 def send_to_telegram(Chat_ID, Bot_Token, filepath, media_type="photo"):
@@ -90,9 +103,9 @@ def countdown(t):
         t -= 1
 
 
-def clock():
+def status_line(dif, delta):
     cl = datetime.now().strftime("%H:%M:%S")
-    print(cl, end="\r")
+    print(f"{cl} | Diff: {dif:,} / Threshold: {int(delta):,}      ", end="\r")
 
 
 # Clear the screen
@@ -106,6 +119,7 @@ parser.add_argument('-sms', '--sms', help='Enter phone number to send sms')
 parser.add_argument('-c', '--call', help='Enter phone number to call')
 parser.add_argument('-n', '--number', help='number of photos you want to be captured', type=int, default=50)
 parser.add_argument('-s', '--seconds', help='Seconds needs to set the device', type=int, default=30)
+parser.add_argument('-st', '--sensitivity', help='Detection sensitivity percentage (default: 100)', type=int, default=100)
 parser.add_argument('-ch', '--chatid', help='your chat id', type=str)
 parser.add_argument('-bt', '--bottoken', help='your telegram bot token', type=str)
 args = parser.parse_args()
@@ -116,7 +130,7 @@ run("termux-wake-lock", shell=True)
 countdown(args.seconds)
 print('Setting up the device...\n')
 
-delta, last_img = setup_num(args.camera)
+delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
 if last_img is None:
     last_img = take_processed_photo(args.camera, 'photo.jpeg')
 
@@ -130,10 +144,9 @@ while True:
         continue
 
     imgArr.append(new_img)
-    dif = dif_of_images(imgArr[0], imgArr[1])
+    dif = dif_of_images(imgArr[0], imgArr[1], noise_cutoff)
     imgArr.pop(0)
-    sleep(1)
-    clock()
+    status_line(dif, delta)
 
     if dif > delta:
         print('\nAn External Object Detected')
@@ -203,8 +216,9 @@ while True:
 
             print(f"\n{sent_count}/{len(photos)} photos sent to your telegram bot.\n")
 
+        print('')
         countdown(3)
         print('\nAgain Setting up the device..')
-        delta, last_img = setup_num(args.camera)
+        delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
         if last_img is not None:
             imgArr = [last_img]
