@@ -10,16 +10,16 @@ from statistics import stdev, mean
 
 
 def dif_of_images(image1, image2):
-    # تبدیل تصاویر به آرایه و نرمال‌سازی روشنایی برای خنثی کردن تغییرات نور محیط
+    # Convert images to float arrays and normalize brightness to neutralize ambient light changes
     arr1 = np.asarray(image1, dtype=np.float32)
     arr2 = np.asarray(image2, dtype=np.float32)
     arr1 = arr1 - np.mean(arr1)
     arr2 = arr2 - np.mean(arr2)
 
-    # محاسبه قدرمطلق اختلاف هر پیکسل
+    # Calculate absolute difference per pixel
     diff = np.abs(arr1 - arr2)
 
-    # نادیده گرفتن نویزهای جزئی (تغییرات کمتر از ۲۵ واحد) و جمع زدن تغییرات واقعی
+    # Ignore minor sensor noise (changes < 25) and sum only significant pixel changes
     significant_changes = np.where(diff > 25, diff, 0)
     return int(np.sum(significant_changes))
 
@@ -37,7 +37,7 @@ def take_processed_photo(camera_id, filename):
     if not os.path.exists(filename):
         return None
     with Image.open(filename) as img:
-        # تغییر اندازه، سیاه‌وسفید کردن و مات کردن جزئی برای حذف نویزهای نقطه‌ای سنسور
+        # Resize, convert to grayscale, and apply slight Gaussian blur to reduce point sensor noise
         processed = img.resize((436, 580)).convert('L').filter(ImageFilter.GaussianBlur(radius=2))
     os.remove(filename)
     return processed
@@ -65,7 +65,7 @@ def setup_num(camera_id, setup_photos=20):
     avg = mean(delta)
     print('\nDevice is set up!                ')
 
-    # تعیین آستانه تشخیص با در نظر گرفتن یک کف حداقلی (50000) برای جلوگیری از حساسیت بیش از حد
+    # Calculate detection threshold with a minimum floor (50000) to prevent false positives
     raw_threshold = maxdel * (1 + std / avg) if avg > 0 else maxdel + 50000
     threshold = max(raw_threshold, 50000)
     return threshold, imgArray[-1]
