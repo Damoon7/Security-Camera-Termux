@@ -8,11 +8,11 @@ This script continuously monitors your environment by capturing and comparing fr
 
 ## ✨ Features
 
-* **Smart Auto-Calibration:** Automatically analyzes the environment on startup to set an optimal motion-detection threshold.
+* **Zero-Config Smart Calibration:** Automatically waits until you place the phone down and leave the frame, then learns the camera's sensor noise and ambient lighting to set an optimal motion-detection threshold.
 * **Burst Photo & Audio Capture:** Captures a configurable number of photos while recording `.aac` audio as soon as motion is detected.
 * **Video Generation:** Optionally merges all captured photos and recorded audio into a timestamped `.mp4` video using `ffmpeg`.
 * **SMS & Phone Call Alerts:** Immediately sends an SMS or places a phone call to your number upon detecting an intruder.
-* **Telegram Bot Integration:** Automatically uploads the captured evidence directly to your Telegram account.
+* **Telegram Bot Integration:** Automatically uploads the captured photos and video directly to your Telegram account.
 * **Background Execution:** Uses `termux-wake-lock` to keep the script running smoothly even when the phone screen is locked.
 
 ---
@@ -51,18 +51,20 @@ pkg install python python-pillow python-numpy termux-api ffmpeg curl -y
 Next, download the script directly to your device:
 
 ```bash
-curl -O https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py
+curl -O [https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py](https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py)
 ```
 
 ---
 
 ## 💻 Usage
 
-Run the script with default settings (back camera, 30-second countdown, 50 photos per detection):
+Run the script with default settings (back camera, 100% sensitivity, 50 photos per detection):
 
 ```bash
 python3 SecCam.py
 ```
+
+Once started, place your phone in the desired position and step out of the camera's view. The script will automatically detect when the device and scene become stable, calibrate itself, and begin monitoring.
 
 To view the help menu:
 
@@ -79,11 +81,9 @@ python3 SecCam.py -h
 | `-sms`, `--sms` | Phone number to receive an SMS alert upon detection | `None` |
 | `-c`, `--call` | Phone number to call upon detection | `None` |
 | `-n`, `--number` | Number of photos to capture when motion is detected | `50` |
-| `-s`, `--seconds` | Initial countdown timer (in seconds) before calibration starts | `30` |
+| `-st`, `--sensitivity` | Detection sensitivity percentage (higher = more sensitive, lower = less sensitive) | `100` |
 | `-ch`, `--chatid` | Your numerical Telegram Chat ID | `None` |
 | `-bt`, `--bottoken` | Your Telegram Bot Token | `None` |
-| `-st`, `--sensitivity` | Detection sensitivity percentage (higher = more sensitive) | `100` |
-
 
 > 💡 **Telegram Setup Tip:** 
 > 1. Create a bot via [@BotFather](https://t.me/BotFather) to get your `Bot_Token`, and make sure to press **Start** inside your new bot.
@@ -94,10 +94,10 @@ python3 SecCam.py -h
 
 ## 📌 Full Example
 
-Use the front camera (`-C 1`), wait 180 seconds before arming (`-s 180`), capture 200 photos (`-n 200`), convert them into a video (`-v 1`), alert via SMS and phone call, and upload the photos to Telegram:
+Use the front camera (`-C 1`), capture 200 photos (`-n 200`), convert them into a video (`-v 1`), set sensitivity to `100%` (`-st 100`), alert via SMS and phone call, and upload the files to Telegram:
 
 ```bash
-python3 SecCam.py -C 1 -v 1 -sms 09120000000 -c 09120000000 -n 200 -s 180 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+python3 SecCam.py -C 1 -v 1 -sms 09120000000 -c 09120000000 -n 200 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ```
 
-All captured photos, recorded audio (`.aac`), and generated video files (`.mp4`) are automatically organized into a timestamped folder (e.g., `2026-10-22_143000/`).
+All captured photos, recorded audio (`.aac`), and generated video files (`.mp4`) are automatically organized into a timestamped folder (e.g., `2026-10-23_143000/`).
