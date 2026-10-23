@@ -1,55 +1,63 @@
 # 📱 Security Camera by Termux
 
-Turn your old or spare Android phone into a smart, motion-detecting security camera using **Termux** and **Python**.
+Turn a spare or old Android phone into a motion-detecting security camera using **Termux** and **Python**.
 
-This script continuously monitors your environment by capturing and comparing frames. Once motion is detected, it automatically triggers an alarm workflow: dynamically recording the event until motion stops, recording ambient audio, and seamlessly uploading evidence to Telegram in the background without missing a second of surveillance.
+The script continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications via SMS, phone call, and Telegram.
 
 ---
 
-## ✨ Features
+## ✨ Key Features
 
-* **Zero-Config Smart Calibration:** Automatically waits until you place the phone down and leave the frame, then learns the camera's sensor noise and ambient lighting to set an optimal motion-detection threshold.
-* **Dynamic Event-Triggered Recording:** The camera smartly records as long as motion persists and automatically stops when the environment becomes calm.
-* **Background Multithreading:** Video conversion (`ffmpeg`) and Telegram uploads run in a background thread, allowing the camera to resume surveillance instantly without missing any activity.
-* **Video Generation & Audio:** Automatically merges captured frames and `.aac` audio into a timestamped `.mp4` video.
-* **SMS & Phone Call Alerts:** Immediately sends an SMS or places a phone call to your number upon detecting an intruder.
-* **Telegram Bot Integration:** Automatically uploads photos and video directly to your Telegram account.
-* **Background Execution:** Uses `termux-wake-lock` to keep the script running smoothly even when the phone screen is locked.
+* **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated.
+* **Dynamic Event Recording:** Keeps recording while motion persists and stops once the scene calms down. The photo that triggered the alarm is always kept as the first evidence frame.
+* **Optimized Telegram Alerts:** Sends a downscaled keyframe album that uploads quickly even on slow mobile networks. If the photo upload fails, a plain text alert is sent instead.
+* **Call & SMS Notifications:** Sends an SMS and/or places a phone call, with a configurable cooldown to prevent notification spam.
+* **Designed for Long-Running Use:** Sequential background task queue, automatic storage pruning, timeouts on all Termux commands, a rotating log file, and an optional frame interval to reduce CPU and battery usage.
 
 ---
 
 ## 📋 Prerequisites
 
 1. **Install Termux & Termux:API:**
-   Download and install both apps from **F-Droid** or **GitHub Releases**.
-   > ⚠️ **Important:** Do **not** install Termux from the Google Play Store, as the Play Store version is deprecated and incompatible with `Termux:API`.
+   Install both apps from **F-Droid** or **GitHub Releases**.
+   > ⚠️ **Important:** Do **not** use the Google Play Store version of Termux. It is deprecated and cannot communicate with `Termux:API`.
 
-2. **Grant Android Permissions:**
-   Go to your phone's **Settings → Apps → Termux:API → Permissions** and enable access to:
+2. **Grant Permissions:**
+   Go to **Settings → Apps → Termux:API → Permissions** and allow:
    * Camera
    * Microphone
    * SMS
    * Phone
 
+3. **Disable battery optimization for Termux (important for long runs):**
+   In your Android settings, set Termux's battery usage to **Unrestricted** (wording and location vary by device). Otherwise Android may kill the script after a while, even with the wake lock.
+
+4. **Keep the phone plugged in.** Continuous camera use drains the battery quickly and heats the device. Place it somewhere with airflow.
+
 ---
 
 ## 🚀 Installation
 
-Open **Termux** and run the following commands to update packages and install all required dependencies:
+Open **Termux** and run:
 
 ```bash
 pkg update && pkg upgrade -y
-pkg install python python-pillow python-numpy termux-api ffmpeg curl -y
+pkg install python python-pillow python-numpy termux-api curl -y
 ```
 
-> 💡 **Alternative Method (if `python-pillow` fails to install via `pkg`):**
-> You can compile and install `Pillow` manually using `pip`:
+If you want MP4 video output (`-v 1`), also install ffmpeg:
+
+```bash
+pkg install ffmpeg -y
+```
+
+> 💡 **Manual Pillow build (if `python-pillow` fails via `pkg`):**
 > ```bash
 > pkg install clang make libjpeg-turbo freetype -y
 > env INCLUDE="$PREFIX/include" LDFLAGS="-lm" pip install Pillow
 > ```
 
-Next, download the script directly to your device:
+Download the script:
 
 ```bash
 curl -O https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py
@@ -57,53 +65,110 @@ curl -O https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/Se
 
 ---
 
-## 💻 Usage
+## 💻 Configuration & Usage
 
-Run the script with default settings (back camera, 100% sensitivity):
+### 1. Telegram Credentials (optional)
+
+Telegram alerts need a bot token and your numeric chat ID:
+
+* Create a bot with [@BotFather](https://t.me/BotFather) to get the token, then press **Start** in your new bot's chat.
+* Message [@userinfobot](https://t.me/userinfobot) to get your numeric Chat ID.
+
+Avoid typing the token directly into the terminal: both the command line and `export` commands are saved in your shell history. Instead, store the credentials in a private file.
+
+Create the file with an editor (`pkg install nano -y` if needed):
+
+```bash
+nano ~/.seccam_env
+```
+
+Put these two lines inside it, then save:
+
+```
+export TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
+export TG_CHAT_ID="123456789"
+```
+
+Restrict access to the file and load it before each run (once per Termux session):
+
+```bash
+chmod 600 ~/.seccam_env
+source ~/.seccam_env
+```
+
+The `-ch` / `-bt` command-line options also work, but they take priority over the environment variables and are visible in your shell history.
+
+### 2. Run Surveillance
+
+Default settings (back camera, 100% sensitivity, video disabled):
 
 ```bash
 python3 SecCam.py
 ```
 
-Once started, place your phone in the desired position and step out of the camera's view. The script will automatically wait until the device and scene stabilize, calibrate itself, and begin monitoring.
+Place the phone in position and step out of view. The script waits for the scene to stabilize, calibrates, and starts monitoring.
 
 ### Stopping the Script
-To safely stop the camera and release all device resources (wake locks and microphone), press:
-```bash
-Ctrl + C
-```
 
-To view the help menu:
-
-```bash
-python3 SecCam.py -h
-```
-
-### Command-Line Options
-
-| Option | Description | Default |
-| :--- | :--- | :--- |
-| `-C`, `--camera` | Camera ID: `0` for back camera, `1` for front camera | `0` |
-| `-v`, `-V`, `--video` | Set to `1` to merge photos and audio into an MP4 video, `0` to disable | `0` |
-| `-sms`, `--sms` | Phone number to receive an SMS alert upon detection | `None` |
-| `-c`, `--call` | Phone number to call upon detection | `None` |
-| `-st`, `--sensitivity` | Detection sensitivity percentage (higher = more sensitive, lower = less sensitive) | `100` |
-| `-ch`, `--chatid` | Your numerical Telegram Chat ID | `None` |
-| `-bt`, `--bottoken` | Your Telegram Bot Token | `None` |
-
-> 💡 **Telegram Setup Tip:** 
-> 1. Create a bot via [@BotFather](https://t.me/BotFather) to get your `Bot_Token`, and make sure to press **Start** inside your new bot.
-> 2. Send a message to [@userinfobot](https://t.me/userinfobot) to find your numerical `Chat_ID`.
-> 3. Both `-ch` and `-bt` must be provided to enable Telegram uploads.
+Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary files, and finishes pending uploads (up to 2 minutes).
 
 ---
 
-## 📌 Full Example
+## ⚙️ Command-Line Options
 
-Use the front camera (`-C 1`), convert event frames into a video (`-v 1`), set sensitivity to `100%` (`-st 100`), alert via SMS and phone call, and upload the files to Telegram:
+| Option | Description | Default |
+| :--- | :--- | :--- |
+| `-C`, `--camera` | Camera ID: `0` (back), `1` (front) | `0` |
+| `-v`, `-V`, `--video` | `1` to encode photos and audio into an MP4 (requires ffmpeg), `0` to skip | `0` |
+| `-sms`, `--sms` | Phone number for SMS alerts | `None` |
+| `-c`, `--call` | Phone number for alert calls | `None` |
+| `-st`, `--sensitivity` | Detection sensitivity in percent (higher = more sensitive) | `100` |
+| `-ch`, `--chatid` | Numeric Telegram Chat ID (overrides `TG_CHAT_ID`) | `None` |
+| `-bt`, `--bottoken` | Telegram Bot Token (overrides `TG_BOT_TOKEN`) | `None` |
+| `--cooldown` | Minimum seconds between SMS/call alerts (does **not** limit Telegram) | `300` |
+| `--max-events` | Number of newest event folders to keep (`0` keeps all) | `20` |
+| `--interval` | Extra sleep in seconds between frames to reduce CPU and battery use | `0.0` |
+| `--log` | Path to the rotating log file | `seccam.log` |
+
+Both a chat ID and a bot token are required to enable Telegram.
+
+---
+
+## 📦 Output & Storage
+
+Every event is saved in its own folder: `events/<YYYY-MM-DD_HHMMSS>/`. It contains the original full-resolution photos, the `.aac` audio, and the `.mp4` video (if enabled).
+
+* **Telegram receives samples only:** up to 6 evenly spaced keyframes (4 when video is enabled), downscaled to about 1920 px, plus the video if it is under Telegram's size limit. The full set of originals stays on the phone.
+* **Old events are deleted automatically.** Only the newest `--max-events` folders are kept (20 by default). Copy anything you want to keep, or use `--max-events 0` to disable pruning and manage storage yourself.
+* **Telegram alerts are sent for every event**, while SMS and calls respect `--cooldown`.
+
+---
+
+## 📌 Examples
+
+### Reduced Power Usage
+Waits 1.5 seconds between frames to reduce CPU and battery usage, and keeps only the 10 newest events. Telegram alerts are sent if the environment variables are loaded:
 
 ```bash
-python3 SecCam.py -C 1 -v 1 -sms 09120000000 -c 09120000000 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+python3 SecCam.py --interval 1.5 --max-events 10
 ```
 
-All captured photos, recorded audio (`.aac`), and generated video files (`.mp4`) are automatically organized into a timestamped folder (e.g., `2026-10-23_143000/`).
+### Video Recording & Calling
+Builds an MP4 for each incident and places an alert call (at most one every 3 minutes). With Telegram credentials loaded (see step 1), the video and keyframes are uploaded too:
+
+```bash
+python3 SecCam.py -v 1 -c 09120000000 --cooldown 180
+```
+
+---
+
+## ⚠️ Limitations
+
+* Detection compares each frame with the previous one. A perfectly still object (for example, someone who stops moving in view) will not keep triggering, and very slow changes are absorbed as normal.
+* If the scene produces constant noise (wind, flickering light, trees), the script recalibrates itself automatically. Monitoring is paused for the few minutes this takes.
+* Photo capture speed depends on the phone; expect several seconds per frame, so very fast movements can be missed.
+* Detection quality depends on camera placement, lighting, and phone model. Test it before relying on it.
+
+## 🔒 Privacy & Legal
+
+This tool records images and audio. Use it only in spaces you own or have permission to monitor, and follow the recording laws and privacy rules of your country. Keep your Telegram bot token private and never commit it to the repository.
