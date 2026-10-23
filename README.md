@@ -97,7 +97,7 @@ python3 SecCam.py -h
 Use the front camera (`-C 1`), convert event frames into a video (`-v 1`), set sensitivity to `100%` (`-st 100`), alert via SMS and phone call, and upload the files to Telegram:
 
 ```bash
-python3 SecCam.py -C 1 -v 1 -sms 09120000000 -c 09120000000 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+python3 SecCam.py -C 1 -v 1 -sms 01234567890 -c 01234567890 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ```
 
 All captured photos, recorded audio (`.aac`), and generated video files (`.mp4`) are automatically organized into a timestamped folder (e.g., `2026-10-23_143000/`).
