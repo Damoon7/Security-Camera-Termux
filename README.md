@@ -9,7 +9,7 @@ This script continuously monitors your environment by capturing and comparing fr
 ## ✨ Features
 
 * **Zero-Config Smart Calibration:** Automatically waits until you place the phone down and leave the frame, then learns the camera's sensor noise and ambient lighting to set an optimal motion-detection threshold.
-* **Dynamic Event-Triggered Recording:** The camera smartly records as long as motion persists and automatically stops when the environment becomes calm.
+* **Dynamic Event-Triggered Recording:** Instead of capturing a fixed number of photos, the camera smartly records as long as motion persists and automatically stops when the environment becomes calm.
 * **Background Multithreading:** Video conversion (`ffmpeg`) and Telegram uploads run in a background thread, allowing the camera to resume surveillance instantly without missing any activity.
 * **Video Generation & Audio:** Automatically merges captured frames and `.aac` audio into a timestamped `.mp4` video.
 * **SMS & Phone Call Alerts:** Immediately sends an SMS or places a phone call to your number upon detecting an intruder.
@@ -67,6 +67,12 @@ python3 SecCam.py
 
 Once started, place your phone in the desired position and step out of the camera's view. The script will automatically wait until the device and scene stabilize, calibrate itself, and begin monitoring.
 
+### Stopping the Script
+To safely stop the camera and release all device resources (wake locks and microphone), press:
+```bash
+Ctrl + C
+```
+
 To view the help menu:
 
 ```bash
@@ -97,7 +103,7 @@ python3 SecCam.py -h
 Use the front camera (`-C 1`), convert event frames into a video (`-v 1`), set sensitivity to `100%` (`-st 100`), alert via SMS and phone call, and upload the files to Telegram:
 
 ```bash
-python3 SecCam.py -C 1 -v 1 -sms 01234567890 -c 01234567890 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
+python3 SecCam.py -C 1 -v 1 -sms 09120000000 -c 09120000000 -st 100 -ch 123456789 -bt 123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
 ```
 
 All captured photos, recorded audio (`.aac`), and generated video files (`.mp4`) are automatically organized into a timestamped folder (e.g., `2026-10-23_143000/`).
