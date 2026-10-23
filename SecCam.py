@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os
+import threading
 from PIL import Image, ImageFilter
 import numpy as np
 from datetime import datetime
@@ -143,9 +144,40 @@ def send_to_telegram(Chat_ID, Bot_Token, filepath, media_type="photo"):
     process = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, text=True)
     stdout, stderr = process.communicate()
     if '"ok":true' not in stdout:
-        print(f"\nTelegram Error: {stdout or stderr}")
         return False
     return True
+
+
+def background_event_processor(event_folder, audio_path, args, fr):
+    """Handles video conversion and Telegram uploads in the background thread."""
+    video_path = os.path.join(event_folder, f"{event_folder}.mp4")
+    
+    # Stop microphone recording in background
+    processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "Can't stop audio recorder!")
+
+    if args.video == 1:
+        ffmpeg_cmd = (
+            f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
+            f"-i '{audio_path}' -c:v libx264 -tune stillimage -c:a aac -b:a 192k "
+            f"-pix_fmt yuv420p -shortest '{video_path}'"
+        )
+        processCommand(ffmpeg_cmd, True, PIPE, PIPE, "Can't convert to video")
+
+    if args.chatid is not None and args.bottoken is not None:
+        msg_cmd = (
+            f'curl -s --connect-timeout 10 -X POST -F chat_id="{args.chatid}" '
+            f'-F text="🚨 An external object detected, here are the files:" '
+            f'https://api.telegram.org/bot{args.bottoken}/sendMessage'
+        )
+        processCommand(msg_cmd, True, DEVNULL, STDOUT, "Can't send Text to telegram!")
+
+        photos = [x for x in sorted(os.listdir(event_folder)) if x.endswith(".jpeg")]
+        for x in photos:
+            filepath = os.path.join(event_folder, x)
+            send_to_telegram(args.chatid, args.bottoken, filepath, "photo")
+
+        if args.video == 1 and os.path.exists(video_path):
+            send_to_telegram(args.chatid, args.bottoken, video_path, "video")
 
 
 def status_line(dif, delta):
@@ -162,7 +194,6 @@ parser.add_argument('-C', '--camera', help='0 for back Camera, 1 for front Camer
 parser.add_argument('-v', '-V', '--video', help='1 to convert photos to video file and 0 for dont convert', type=int, default=0)
 parser.add_argument('-sms', '--sms', help='Enter phone number to send sms')
 parser.add_argument('-c', '--call', help='Enter phone number to call')
-parser.add_argument('-n', '--number', help='number of photos you want to be captured', type=int, default=50)
 parser.add_argument('-st', '--sensitivity', help='Detection sensitivity percentage (default: 100)', type=int, default=100)
 parser.add_argument('-ch', '--chatid', help='your chat id', type=str)
 parser.add_argument('-bt', '--bottoken', help='your telegram bot token', type=str)
@@ -192,74 +223,65 @@ while True:
     status_line(dif, delta)
 
     if dif > delta:
-        print('\nAn External Object Detected')
+        print('\n🚨 An External Object Detected (Recording until motion stops...)')
 
         if args.sms is not None:
-            processCommand(f'termux-sms-send -n "{args.sms}" "An External Object Detected"', True, PIPE, PIPE, "Can't send message to you")
-            print(f"\nMessage sent to {args.sms}")
+            processCommand(f'termux-sms-send -n "{args.sms}" "An External Object Detected"', True, PIPE, PIPE, "Can't send message")
+            print(f"Message sent to {args.sms}")
 
         if args.call is not None:
-            print(f"\nCalling {args.call}\n")
-            processCommand(f"termux-telephony-call {args.call}", True, DEVNULL, STDOUT, "Can't call you")
+            print(f"Calling {args.call}")
+            processCommand(f"termux-telephony-call {args.call}", True, DEVNULL, STDOUT, "Can't call")
 
         event_folder = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         os.makedirs(event_folder, exist_ok=True)
         audio_path = os.path.join(event_folder, f"{event_folder}.aac")
 
         processCommand(f'termux-microphone-record -f "{audio_path}" -e aac', True, DEVNULL, STDOUT, "Can't record audio")
-        print("\nIt's taking Photos...")
-
+        
+        # Dynamic Capture Loop (Records until motion stops)
         start = time()
-        for i in range(args.number):
+        photo_index = 0
+        consecutive_calm = 0
+        prev_motion_img = new_img
+
+        while True:
+            photo_index += 1
             now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            photo_path = os.path.join(event_folder, f"{now}_{i+1:03d}.jpeg")
-            print(f"Capturing photo {i+1}/{args.number}...   ", end="\r")
+            photo_path = os.path.join(event_folder, f"{now}_{photo_index:03d}.jpeg")
+            print(f"Recording event... captured: {photo_index} photos   ", end="\r")
+            
             processCommand(f'termux-camera-photo -c {args.camera} "{photo_path}"', True, PIPE, PIPE, "Can't take photo")
-        end = time()
-
-        delTime = max(1.0, end - start)
-        fr = max(1.0, round(args.number / delTime, 1))
-
-        processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "Can't stop audio recorder!")
-
-        video_path = os.path.join(event_folder, f"{event_folder}.mp4")
-        if args.video == 1:
-            print('\nConverting photos to video...')
-            ffmpeg_cmd = (
-                f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
-                f"-i '{audio_path}' -c:v libx264 -tune stillimage -c:a aac -b:a 192k "
-                f"-pix_fmt yuv420p -shortest '{video_path}'"
-            )
-            processCommand(ffmpeg_cmd, True, PIPE, PIPE, "Can't convert to video")
-            print(f"\nVideo file created at: {video_path}\n")
-
-        if args.chatid is not None and args.bottoken is not None:
-            msg_cmd = (
-                f'curl -s --connect-timeout 10 -X POST -F chat_id="{args.chatid}" '
-                f'-F text="An external object detected, here are the files:" '
-                f'https://api.telegram.org/bot{args.bottoken}/sendMessage'
-            )
-            processCommand(msg_cmd, True, DEVNULL, STDOUT, "Can't send Text to telegram!")
-            print('\nStart sending taken photos to telegram:\n')
-
-            photos = [x for x in sorted(os.listdir(event_folder)) if x.endswith(".jpeg")]
-            sent_count = 0
-            for idx, x in enumerate(photos, 1):
-                filepath = os.path.join(event_folder, x)
-                if send_to_telegram(args.chatid, args.bottoken, filepath, "photo"):
-                    sent_count += 1
-                    print(f"Uploading to telegram: {idx}/{len(photos)}   ", end="\r")
+            
+            current_motion_img = take_processed_photo(args.camera, 'photo_check.jpeg')
+            if current_motion_img is not None:
+                current_diff = dif_of_images(prev_motion_img, current_motion_img, noise_cutoff)
+                prev_motion_img = current_motion_img
+                
+                if current_diff <= delta:
+                    consecutive_calm += 1
                 else:
-                    print("\nStopping upload due to connection/API error.")
-                    break
+                    consecutive_calm = 0
+            
+            # If environment remains calm for 3 consecutive frames, stop recording!
+            if consecutive_calm >= 3:
+                print(f"\nMotion stopped. Total captured: {photo_index} photos.")
+                break
+            
+            # Safety break in case an event lasts too long (max 300 photos per event)
+            if photo_index >= 300:
+                break
 
-            if args.video == 1 and os.path.exists(video_path):
-                print("\nUploading video to telegram...")
-                send_to_telegram(args.chatid, args.bottoken, video_path, "video")
+        end = time()
+        delTime = max(1.0, end - start)
+        fr = max(1.0, round(photo_index / delTime, 1))
 
-            print(f"\n{sent_count}/{len(photos)} photos sent to your telegram bot.\n")
+        # Spin off background thread for FFmpeg and Telegram uploads (Non-blocking!)
+        bg_thread = threading.Thread(target=background_event_processor, args=(event_folder, audio_path, args, fr))
+        bg_thread.start()
 
-        print('\nAgain Setting up the device..')
+        print('\n[Info] Processing & uploading in background. Resuming surveillance instantly...')
+        
         delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
         if last_img is not None:
             imgArr = [last_img]
