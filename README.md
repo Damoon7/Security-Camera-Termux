@@ -52,7 +52,7 @@ pkg install python python-pillow python-numpy termux-api ffmpeg curl -y
 Next, download the script directly to your device:
 
 ```bash
-curl -O [https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py](https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py)
+curl -O https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/SecCam.py
 ```
 
 ---
