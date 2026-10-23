@@ -1,17 +1,108 @@
 #!/usr/bin/env python3
+"""Security Camera for Termux (hardened & optimized version).
+
+Key Features:
+  - Video default is 0 (skips ffmpeg to save battery/CPU); sends keyframes as one Telegram album.
+  - On-the-fly photo optimization: creates lightweight Full-HD JPEG copies for Telegram dispatch,
+    then cleans them up (original high-res evidence is kept intact on disk).
+  - If a Telegram photo upload fails, a plain text alert is sent instead.
+  - Preserves the initial trigger photo as the first evidence frame (_001.jpeg).
+  - No shell=True: every command is an argv list (injection-proof).
+  - Stale-photo protection: temp photo is deleted before every capture to prevent false negatives.
+  - Auto-recalibration safeguard against persistent noise / ambient light shifts.
+  - Timeouts on all Termux commands to prevent camera lockups.
+  - Single background worker queue for orderly uploads.
+  - Cooldowns on SMS/call alerts & automatic disk pruning for old events.
+"""
 import os
+import re
+import sys
+import json
+import queue
+import shutil
+import signal
+import logging
 import threading
-from PIL import Image, ImageFilter
-import numpy as np
-from datetime import datetime
 from argparse import ArgumentParser
+from datetime import datetime
+from glob import glob
+from logging.handlers import RotatingFileHandler
+from statistics import stdev, median
+from subprocess import run, PIPE, TimeoutExpired
 from time import sleep, time
-from subprocess import Popen, PIPE, DEVNULL, STDOUT, run
-from statistics import stdev, mean, median
+
+import numpy as np
+from PIL import Image, ImageFilter, ImageOps
+
+log = logging.getLogger("seccam")
+
+EVENTS_DIR = "events"
+TMP_PHOTO = "photo_tmp.jpeg"
+PHOTO_TIMEOUT = 40          # seconds for a single termux-camera-photo call
+MAX_PHOTOS_PER_EVENT = 300
+MAX_TG_SAMPLES_NO_VIDEO = 6
+MAX_TG_SAMPLES_WITH_VIDEO = 4
+TG_ALBUM_TIMEOUT = 240      # albums of full-size photos need a generous timeout
+TG_VIDEO_LIMIT = 49 * 1024 * 1024
 
 
+# --------------------------------------------------------------------------- #
+# Helpers
+# --------------------------------------------------------------------------- #
+def setup_logging(path):
+    log.setLevel(logging.INFO)
+    fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
+    fh = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
+    fh.setFormatter(fmt)
+    log.addHandler(fh)
+    ch = logging.StreamHandler(sys.stdout)
+    ch.setFormatter(logging.Formatter("%(message)s"))
+    log.addHandler(ch)
+
+
+def run_cmd(cmd, timeout=30, input_text=None):
+    """Run an argv list (never through a shell). Returns CompletedProcess or None."""
+    try:
+        return run(cmd, input=input_text, stdout=PIPE, stderr=PIPE,
+                   text=True, errors="replace", timeout=timeout)
+    except TimeoutExpired:
+        log.warning("Timeout (%ss): %s", timeout, cmd[0])
+    except Exception as exc:
+        log.warning("Command failed (%s): %s", cmd[0], exc)
+    return None
+
+
+def remove_if_exists(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def validate_args(args):
+    if not re.fullmatch(r"\d+", args.camera):
+        sys.exit("Error: --camera must be a number (0 or 1)")
+    for name in ("sms", "call"):
+        val = getattr(args, name)
+        if val is not None and not re.fullmatch(r"\+?\d{3,15}", val):
+            sys.exit(f"Error: --{name} must be a phone number (digits, optional leading +)")
+    if args.chatid is not None and not re.fullmatch(r"-?\d+", args.chatid):
+        sys.exit("Error: chat id must be numeric")
+    if args.bottoken is not None and not re.fullmatch(r"\d+:[A-Za-z0-9_-]+", args.bottoken):
+        sys.exit("Error: bot token format looks wrong")
+    if (args.chatid is None) != (args.bottoken is None):
+        sys.exit("Error: both chat id and bot token are required for Telegram")
+    if args.video not in (0, 1):
+        sys.exit("Error: --video must be 0 or 1")
+
+
+# --------------------------------------------------------------------------- #
+# Image processing
+# --------------------------------------------------------------------------- #
 def get_normalized_diff(image1, image2):
-    # Convert images to float arrays and normalize both brightness (mean) and contrast (std)
+    if image2.size != image1.size:
+        image2 = image2.resize(image1.size)
     arr1 = np.asarray(image1, dtype=np.float32)
     arr2 = np.asarray(image2, dtype=np.float32)
     arr1 = arr1 - np.mean(arr1)
@@ -27,18 +118,8 @@ def get_normalized_diff(image1, image2):
 
 def dif_of_images(image1, image2, noise_cutoff=10.0):
     diff = get_normalized_diff(image1, image2)
-    # Ignore sensor noise below the calibrated cutoff and sum only significant pixel changes
-    significant_changes = np.where(diff > noise_cutoff, diff, 0)
-    return int(np.sum(significant_changes))
-
-
-def processCommand(command, shellVal, stout, sterr, err):
-    try:
-        process = Popen(command, shell=shellVal, stdout=stout, stderr=sterr)
-        process.communicate()
-    except Exception:
-        if err:
-            print(err)
+    significant = np.where(diff > noise_cutoff, diff, 0)
+    return int(np.sum(significant))
 
 
 def process_image_file(filepath):
@@ -46,50 +127,77 @@ def process_image_file(filepath):
         return None
     try:
         with Image.open(filepath) as img:
-            # Resize, convert to grayscale, and apply Gaussian blur to reduce point sensor noise
-            return img.resize((436, 580)).convert('L').filter(ImageFilter.GaussianBlur(radius=2))
+            img = ImageOps.exif_transpose(img)
+            img = img.convert("L")
+            img.thumbnail((580, 580))  # keeps aspect ratio
+            return img.filter(ImageFilter.GaussianBlur(radius=2))
     except Exception:
         return None
 
 
-def take_processed_photo(camera_id, filename):
-    processCommand(f'termux-camera-photo -c {camera_id} "{filename}"', True, PIPE, PIPE, "Can't take photo")
+def take_processed_photo(camera_id, filename=TMP_PHOTO, keep_file=False):
+    # Always delete any previous file first: if the camera call fails or times out,
+    # we must get None back instead of silently re-reading a stale photo.
+    remove_if_exists(filename)
+    run_cmd(["termux-camera-photo", "-c", camera_id, filename], timeout=PHOTO_TIMEOUT)
     processed = process_image_file(filename)
-    if os.path.exists(filename):
-        os.remove(filename)
+    if not keep_file or processed is None:
+        remove_if_exists(filename)
     return processed
 
 
-def setup_num(camera_id, sensitivity=100, min_stable_frames=12):
-    imgArray = []
+def prepare_tg_photo(filepath, max_dim=1920, quality=82):
+    """Creates a temporary downscaled JPEG for fast, low-bandwidth Telegram dispatch."""
+    opt_path = filepath + ".tg.jpg"
+    try:
+        resample = getattr(Image, "Resampling", Image).LANCZOS
+        with Image.open(filepath) as img:
+            if img.format == "JPEG":
+                # Decode at reduced scale (much faster/lighter on phones); must precede load()
+                img.draft("RGB", (max_dim, max_dim))
+            img = ImageOps.exif_transpose(img)
+            img.thumbnail((max_dim, max_dim), resample)
+            img.convert("RGB").save(opt_path, "JPEG", quality=quality, optimize=True)
+        return opt_path
+    except Exception as exc:
+        log.warning("Could not optimise %s for Telegram (%s); sending original", filepath, exc)
+        remove_if_exists(opt_path)
+        return filepath
+
+
+# --------------------------------------------------------------------------- #
+# Calibration
+# --------------------------------------------------------------------------- #
+def setup_num(camera_id, sensitivity=100, min_stable_frames=12, max_photos=200):
+    img_array = []
     p995_history = []
     stable_count = 1
     total_taken = 0
 
-    # Discard the first frame to avoid initial camera auto-exposure/focus jump on cold start
     print("Warming up camera...                ", end="\r")
-    take_processed_photo(camera_id, 'img_set.jpeg')
+    take_processed_photo(camera_id, keep_file=False)
 
-    # Wait until the phone is placed down and the scene has no physical motion
     while stable_count < min_stable_frames:
+        if total_taken >= max_photos:
+            if len(img_array) >= 3:
+                log.warning("\nScene never fully stabilised; calibrating with current frames.")
+                break
+            raise RuntimeError("Camera is not producing usable photos.")
+
         total_taken += 1
         print(f"Calibrating: {stable_count}/{min_stable_frames} stable (photo #{total_taken})   ", end="\r")
-        img = take_processed_photo(camera_id, 'img_set.jpeg')
+        img = take_processed_photo(camera_id, keep_file=False)
         if img is None:
             sleep(1)
             continue
 
-        if imgArray:
-            diff_mat = get_normalized_diff(imgArray[-1], img)
-            p995 = float(np.percentile(diff_mat, 99.5))
-            p995_history.append(p995)
-
+        if img_array:
+            diff_mat = get_normalized_diff(img_array[-1], img)
+            p995_history.append(float(np.percentile(diff_mat, 99.5)))
             if len(p995_history) > min_stable_frames - 1:
                 p995_history.pop(0)
 
             med_p995 = median(p995_history)
-
-            # Reject only actual motion/placement spikes while keeping natural camera sensor variance
             stable_transitions = 0
             for val in reversed(p995_history):
                 if val <= med_p995 * 2.0 + 6.0 and val < 25.0:
@@ -98,222 +206,362 @@ def setup_num(camera_id, sensitivity=100, min_stable_frames=12):
                     break
             stable_count = stable_transitions + 1
 
-        imgArray.append(img)
-        if len(imgArray) > min_stable_frames:
-            imgArray.pop(0)
+        img_array.append(img)
+        if len(img_array) > min_stable_frames:
+            img_array.pop(0)
 
         if stable_count < min_stable_frames:
             sleep(1)
 
-    # Step 1: Compute all pairwise differences across the stable calibration window
-    pair_diffs = [
-        get_normalized_diff(imgArray[x], imgArray[y])
-        for x in range(len(imgArray))
-        for y in range(x + 1, len(imgArray))
-    ]
+    pairs = [(x, y) for x in range(len(img_array)) for y in range(x + 1, len(img_array))]
+    pair_diffs = [get_normalized_diff(img_array[x], img_array[y]) for x, y in pairs]
 
-    # Step 2: Set pixel noise cutoff with a 35% margin above the 99.8th percentile of stationary pairs
-    noise_998 = float(np.percentile(pair_diffs, 99.8))
-    noise_995 = float(np.percentile(pair_diffs, 99.5))
+    flat = np.concatenate([d.ravel()[::2] for d in pair_diffs])
+    noise_998 = float(np.percentile(flat, 99.8))
+    noise_995 = float(np.percentile(flat, 99.5))
+    del flat, pair_diffs
     noise_cutoff = max(7.0, noise_998 * 1.35)
 
-    # Step 3: Measure stationary fluctuations at both the probe level (99.5%) and final cutoff
-    probe_delta = [
-        dif_of_images(imgArray[x], imgArray[y], max(5.0, noise_995))
-        for x in range(len(imgArray))
-        for y in range(x + 1, len(imgArray))
-    ]
-    delta = [
-        dif_of_images(imgArray[x], imgArray[y], noise_cutoff)
-        for x in range(len(imgArray))
-        for y in range(x + 1, len(imgArray))
-    ]
+    probe_delta = [dif_of_images(img_array[x], img_array[y], max(5.0, noise_995)) for x, y in pairs]
+    delta = [dif_of_images(img_array[x], img_array[y], noise_cutoff) for x, y in pairs]
 
     maxdel = max(delta)
     std = stdev(delta) if len(delta) > 1 else 0.0
     probe_max = max(probe_delta)
     probe_std = stdev(probe_delta) if len(probe_delta) > 1 else 0.0
 
-    # Step 4: Combine statistical camera variance with minimum physical object area (~0.2% of frame)
     statistical_bound = int(maxdel * 2.5 + 6.0 * std + probe_max * 1.5 + 3.0 * probe_std)
     area_bound = int(500 * noise_cutoff)
     base_threshold = max(statistical_bound, area_bound)
 
-    # Apply optional user sensitivity scaling (default 100% leaves base_threshold unchanged)
     sensitivity = max(1, sensitivity)
     threshold = max(1, int(base_threshold * (100.0 / sensitivity)))
 
-    print(f"\nSet up in {total_taken} photos! (Cutoff: {noise_cutoff:.1f} | Thr: {threshold:,})")
-    return threshold, noise_cutoff, imgArray[-1]
+    log.info("\nSet up in %d photos! (Cutoff: %.1f | Thr: %s)", total_taken, noise_cutoff, f"{threshold:,}")
+    return threshold, noise_cutoff, img_array[-1]
 
 
-def send_to_telegram(Chat_ID, Bot_Token, filepath, media_type="photo"):
-    endpoint = "sendPhoto" if media_type == "photo" else "sendVideo"
-    cmd = f'curl -s --connect-timeout 15 -X POST -F chat_id="{Chat_ID}" -F {media_type}=@"{filepath}" https://api.telegram.org/bot{Bot_Token}/{endpoint}'
-    process = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, text=True)
-    stdout, stderr = process.communicate()
-    if '"ok":true' not in stdout:
-        return False
-    return True
+# --------------------------------------------------------------------------- #
+# Telegram
+# --------------------------------------------------------------------------- #
+def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
+    for attempt in range(1, retries + 1):
+        cmd = ["curl", "-s", "--connect-timeout", "15", "--max-time", str(timeout), "-K", "-"]
+        for k, v in (fields or {}).items():
+            cmd += ["--form-string", f"{k}={v}"]
+        for k, p in (files or {}).items():
+            cmd += ["-F", f"{k}=@{p}"]
+        cfg = f'url = "https://api.telegram.org/bot{token}/{method}"\n'
+        res = run_cmd(cmd, timeout=timeout + 10, input_text=cfg)
+        if res and res.stdout:
+            try:
+                data = json.loads(res.stdout)
+            except ValueError:
+                data = {}
+            if data.get("ok"):
+                return True
+            code = data.get("error_code")
+            if code == 429:
+                sleep(min(int(data.get("parameters", {}).get("retry_after", 5)), 60))
+                continue
+            if code in (400, 401, 403, 404):
+                log.error("Telegram %s rejected (%s): %s", method, code, data.get("description"))
+                return False
+        sleep(2 * attempt)
+    log.error("Telegram %s failed after %d attempts", method, retries)
+    return False
 
 
-def background_event_processor(event_folder, audio_path, args, fr):
-    """Handles video conversion and Telegram uploads in the background thread."""
-    video_path = os.path.join(event_folder, f"{event_folder}.mp4")
+def send_event_to_telegram(cfg, folder, video_path, photo_count):
+    token, chat = cfg["bottoken"], cfg["chatid"]
+    caption = f"🚨 External object detected ({os.path.basename(folder)}), {photo_count} photos"
 
-    if args.video == 1:
-        if os.path.exists(audio_path):
-            ffmpeg_cmd = (
-                f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
-                f"-i '{audio_path}' -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' "
-                f"-c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest '{video_path}'"
-            )
+    raw_photos = sorted(glob(os.path.join(folder, "*.jpeg")))
+    max_samples = MAX_TG_SAMPLES_WITH_VIDEO if video_path else MAX_TG_SAMPLES_NO_VIDEO
+    if len(raw_photos) > max_samples:
+        idx = sorted(set(np.linspace(0, len(raw_photos) - 1, max_samples).round().astype(int)))
+        selected_photos = [raw_photos[i] for i in idx]
+    else:
+        selected_photos = raw_photos
+
+    upload_photos = [prepare_tg_photo(p) for p in selected_photos]
+
+    try:
+        if len(upload_photos) == 1:
+            ok = tg_request(token, "sendPhoto", {"chat_id": chat, "caption": caption},
+                            {"photo": upload_photos[0]}, timeout=TG_ALBUM_TIMEOUT)
+        elif len(upload_photos) >= 2:
+            media = [{"type": "photo", "media": f"attach://p{i}"} for i in range(len(upload_photos))]
+            media[0]["caption"] = caption
+            ok = tg_request(token, "sendMediaGroup",
+                            {"chat_id": chat, "media": json.dumps(media)},
+                            {f"p{i}": p for i, p in enumerate(upload_photos)},
+                            timeout=TG_ALBUM_TIMEOUT)
         else:
-            ffmpeg_cmd = (
-                f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
-                f"-vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' "
-                f"-c:v libx264 -tune stillimage -pix_fmt yuv420p '{video_path}'"
-            )
-        processCommand(ffmpeg_cmd, True, PIPE, PIPE, "Can't convert to video")
+            ok = tg_request(token, "sendMessage", {"chat_id": chat, "text": caption})
 
-    if args.chatid is not None and args.bottoken is not None:
-        msg_cmd = (
-            f'curl -s --connect-timeout 10 -X POST -F chat_id="{args.chatid}" '
-            f'-F text="🚨 An external object detected, here are the files:" '
-            f'https://api.telegram.org/bot{args.bottoken}/sendMessage'
-        )
-        processCommand(msg_cmd, True, DEVNULL, STDOUT, "Can't send Text to telegram!")
+        if not ok and upload_photos:
+            # Photos didn't make it: at least tell the owner something happened
+            tg_request(token, "sendMessage",
+                       {"chat_id": chat, "text": caption + " (photo upload failed, files kept on phone)"})
 
-        photos = [x for x in sorted(os.listdir(event_folder)) if x.endswith(".jpeg")]
-        for x in photos:
-            filepath = os.path.join(event_folder, x)
-            if not send_to_telegram(args.chatid, args.bottoken, filepath, "photo"):
+        if video_path and os.path.exists(video_path):
+            if os.path.getsize(video_path) <= TG_VIDEO_LIMIT:
+                tg_request(token, "sendVideo",
+                           {"chat_id": chat, "supports_streaming": "true"},
+                           {"video": video_path}, timeout=300)
+            else:
+                log.warning("Video too large for Telegram, kept locally: %s", video_path)
+    finally:
+        for p in upload_photos:
+            if p.endswith(".tg.jpg"):
+                remove_if_exists(p)
+
+
+# --------------------------------------------------------------------------- #
+# Background worker
+# --------------------------------------------------------------------------- #
+def build_video(folder, audio_path, fr):
+    video_path = os.path.join(folder, "event.mp4")
+    has_audio = os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fr),
+           "-pattern_type", "glob", "-i", os.path.join(folder, "*.jpeg")]
+    if has_audio:
+        cmd += ["-i", audio_path]
+    cmd += ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264",
+            "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "10"]
+    if has_audio:
+        cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
+    cmd.append(video_path)
+    res = run_cmd(cmd, timeout=900)
+    if res is None or res.returncode != 0 or not os.path.exists(video_path):
+        log.error("ffmpeg failed: %s", (res.stderr[-300:] if res else "timeout"))
+        return None
+    return video_path
+
+
+def prune_events(max_events):
+    if max_events <= 0 or not os.path.isdir(EVENTS_DIR):
+        return
+    dirs = sorted(d for d in os.listdir(EVENTS_DIR) if os.path.isdir(os.path.join(EVENTS_DIR, d)))
+    for old in dirs[:-max_events]:
+        shutil.rmtree(os.path.join(EVENTS_DIR, old), ignore_errors=True)
+        log.info("Pruned old event folder: %s", old)
+
+
+def worker_loop(q, args):
+    tg_cfg = None
+    if args.chatid and args.bottoken:
+        tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
+    while True:
+        item = q.get()
+        if item is None:
+            q.task_done()
+            break
+        folder, audio_path, fr, photo_count = item
+        try:
+            video_path = build_video(folder, audio_path, fr) if args.video == 1 else None
+            if tg_cfg:
+                send_event_to_telegram(tg_cfg, folder, video_path, photo_count)
+        except Exception:
+            log.exception("Background processing failed for %s", folder)
+        finally:
+            prune_events(args.max_events)
+            q.task_done()
+
+
+# --------------------------------------------------------------------------- #
+# Event recording
+# --------------------------------------------------------------------------- #
+def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
+    stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+    folder = os.path.join(EVENTS_DIR, stamp)
+    os.makedirs(folder, exist_ok=True)
+    audio_path = os.path.join(folder, f"{stamp}.aac")
+
+    run_cmd(["termux-microphone-record", "-f", audio_path, "-e", "aac"], timeout=15)
+
+    start = time()
+    photo_index = 0
+    failures = 0
+    consecutive_calm = 0
+    prev_img = first_img
+
+    # Preserve the initial trigger photo as the first evidence frame (_001.jpeg)
+    if trigger_photo and os.path.exists(trigger_photo):
+        first_frame_path = os.path.join(folder, f"{stamp}_{photo_index + 1:03d}.jpeg")
+        try:
+            shutil.move(trigger_photo, first_frame_path)
+            photo_index += 1
+        except Exception as exc:
+            log.warning("Could not save trigger photo: %s", exc)
+            remove_if_exists(trigger_photo)
+
+    while photo_index < MAX_PHOTOS_PER_EVENT:
+        photo_index += 1
+        now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
+        photo_path = os.path.join(folder, f"{now}_{photo_index:03d}.jpeg")
+        print(f"Recording event... captured: {photo_index} photos   ", end="\r")
+
+        run_cmd(["termux-camera-photo", "-c", camera_id, photo_path], timeout=PHOTO_TIMEOUT)
+        cur_img = process_image_file(photo_path)
+        if cur_img is None:
+            photo_index -= 1  # keep numbering and count honest
+            failures += 1
+            if failures >= 5:
+                log.warning("\nCamera failing during event, ending recording early.")
                 break
+            continue
 
-        if args.video == 1 and os.path.exists(video_path):
-            send_to_telegram(args.chatid, args.bottoken, video_path, "video")
+        failures = 0
+        current_diff = dif_of_images(prev_img, cur_img, noise_cutoff)
+        prev_img = cur_img
+        consecutive_calm = consecutive_calm + 1 if current_diff <= delta else 0
+        if consecutive_calm >= 3:
+            break
+
+    run_cmd(["termux-microphone-record", "-q"], timeout=15)
+
+    elapsed = max(1.0, time() - start)
+    fr = min(30.0, max(0.05, round(photo_index / elapsed, 3)))
+    log.info("\nMotion stopped. Total captured: %d photos in %.0fs.", photo_index, elapsed)
+    return folder, audio_path, fr, photo_index, prev_img
 
 
+# --------------------------------------------------------------------------- #
+# Main
+# --------------------------------------------------------------------------- #
 def status_line(dif, delta):
     cl = datetime.now().strftime("%H:%M:%S")
     print(f"{cl} | Diff: {dif:,} / Thr: {int(delta):,}    ", end="\r")
 
 
-# Clear the screen
-run("clear", shell=True)
+def parse_args():
+    p = ArgumentParser()
+    p.add_argument("-C", "--camera", help="0 for back camera, 1 for front camera", type=str, default="0")
+    p.add_argument("-v", "-V", "--video", help="1 to convert photos to video, 0 to skip (default: 0)", type=int, default=0)
+    p.add_argument("-sms", "--sms", help="Phone number to send SMS to")
+    p.add_argument("-c", "--call", help="Phone number to call")
+    p.add_argument("-st", "--sensitivity", help="Detection sensitivity %% (default: 100)", type=int, default=100)
+    p.add_argument("-ch", "--chatid", help="Telegram chat id (or env TG_CHAT_ID)", type=str)
+    p.add_argument("-bt", "--bottoken", help="Telegram bot token (or env TG_BOT_TOKEN)", type=str)
+    p.add_argument("--cooldown", help="Min seconds between SMS/call alerts (default: 300)", type=int, default=300)
+    p.add_argument("--max-events", help="Keep only newest N event folders (0 = keep all, default: 20)",
+                   type=int, default=20)
+    p.add_argument("--interval", help="Extra seconds to sleep between frames (saves battery)",
+                   type=float, default=0.0)
+    p.add_argument("--log", help="Log file path (default: seccam.log)", default="seccam.log")
+    args = p.parse_args()
 
-# Arguments:
-parser = ArgumentParser()
-parser.add_argument('-C', '--camera', help='0 for back Camera, 1 for front Camera', type=str, default='0')
-parser.add_argument('-v', '-V', '--video', help='1 to convert photos to video file and 0 for dont convert', type=int, default=0)
-parser.add_argument('-sms', '--sms', help='Enter phone number to send sms')
-parser.add_argument('-c', '--call', help='Enter phone number to call')
-parser.add_argument('-st', '--sensitivity', help='Detection sensitivity percentage (default: 100)', type=int, default=100)
-parser.add_argument('-ch', '--chatid', help='your chat id', type=str)
-parser.add_argument('-bt', '--bottoken', help='your telegram bot token', type=str)
-args = parser.parse_args()
+    if args.chatid is None:
+        args.chatid = os.environ.get("TG_CHAT_ID")
+    if args.bottoken is None:
+        args.bottoken = os.environ.get("TG_BOT_TOKEN")
+    validate_args(args)
+    return args
 
-# Wake up Termux while phone is locked:
-run("termux-wake-lock", shell=True)
 
-print('Setting up the device (place phone in position)...\n')
+def _raise_interrupt(signum, frame):
+    raise KeyboardInterrupt
 
-try:
-    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
-    if last_img is None:
-        last_img = take_processed_photo(args.camera, 'photo.jpeg')
 
-    imgArr = [last_img]
-    sleep(1)
+def main():
+    args = parse_args()
+    setup_logging(args.log)
+    signal.signal(signal.SIGTERM, _raise_interrupt)
+    os.makedirs(EVENTS_DIR, exist_ok=True)
 
-    while True:
-        new_img = take_processed_photo(args.camera, 'photo.jpeg')
-        if new_img is None:
-            sleep(1)
-            continue
+    jobs = queue.Queue()
+    worker = threading.Thread(target=worker_loop, args=(jobs, args), daemon=True)
+    worker.start()
 
-        imgArr.append(new_img)
-        dif = dif_of_images(imgArr[0], imgArr[1], noise_cutoff)
-        imgArr.pop(0)
-        status_line(dif, delta)
+    run_cmd(["termux-wake-lock"], timeout=10)
+    log.info("Setting up the device (place phone in position)...\n")
 
-        if dif > delta:
-            print('\n🚨 An External Object Detected (Recording until motion stops...)')
+    last_alert = 0.0
+    rapid_triggers = 0
 
-            if args.sms is not None:
-                processCommand(f'termux-sms-send -n "{args.sms}" "An External Object Detected"', True, PIPE, PIPE, "Can't send message")
-                print(f"Message sent to {args.sms}")
+    try:
+        delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+        prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+        sleep(1)
 
-            if args.call is not None:
-                print(f"Calling {args.call}")
-                processCommand(f"termux-telephony-call {args.call}", True, DEVNULL, STDOUT, "Can't call")
+        fails = 0
+        while True:
+            # keep_file=True so the photo can be preserved as evidence if it triggers
+            img = take_processed_photo(args.camera, keep_file=True)
+            if img is None:
+                fails += 1
+                if fails % 10 == 0:
+                    log.warning("Camera failed %d times in a row", fails)
+                sleep(min(30, fails))
+                continue
+            fails = 0
 
-            event_folder = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-            os.makedirs(event_folder, exist_ok=True)
-            audio_path = os.path.join(event_folder, f"{event_folder}.aac")
+            if prev is None:
+                prev = img
+                continue
 
-            processCommand(f'termux-microphone-record -f "{audio_path}" -e aac', True, DEVNULL, STDOUT, "Can't record audio")
+            dif = dif_of_images(prev, img, noise_cutoff)
+            prev = img
+            status_line(dif, delta)
 
-            # Dynamic Capture Loop (Records until motion stops)
-            start = time()
-            photo_index = 0
-            consecutive_calm = 0
-            prev_motion_img = new_img
+            if dif > delta:
+                rapid_triggers += 1
+                # 3 triggers back-to-back with no calm frame in between: likely persistent
+                # noise or a lighting shift, so re-learn the baseline.
+                if rapid_triggers >= 3:
+                    log.warning("\n⚠️ Persistent high difference detected (noise or lighting shift).")
+                    log.info("Auto-recalibrating sensor baseline...")
+                    remove_if_exists(TMP_PHOTO)
+                    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+                    prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+                    rapid_triggers = 0
+                    continue
 
-            while True:
-                photo_index += 1
-                now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
-                photo_path = os.path.join(event_folder, f"{now}_{photo_index:03d}.jpeg")
-                print(f"Recording event... captured: {photo_index} photos   ", end="\r")
+                log.warning("\n🚨 An External Object Detected (Recording until motion stops...)")
 
-                processCommand(f'termux-camera-photo -c {args.camera} "{photo_path}"', True, PIPE, PIPE, "Can't take photo")
+                if time() - last_alert >= args.cooldown:
+                    last_alert = time()
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    if args.sms:
+                        run_cmd(["termux-sms-send", "-n", args.sms,
+                                 f"An External Object Detected at {stamp}"], timeout=30)
+                        log.info("SMS sent to %s", args.sms)
+                    if args.call:
+                        run_cmd(["termux-telephony-call", args.call], timeout=30)
+                        log.info("Calling %s", args.call)
+                else:
+                    log.info("SMS/call suppressed (cooldown active)")
 
-                # Process the captured evidence photo directly in memory (avoids taking a second dummy photo)
-                current_motion_img = process_image_file(photo_path)
-                if current_motion_img is not None:
-                    current_diff = dif_of_images(prev_motion_img, current_motion_img, noise_cutoff)
-                    prev_motion_img = current_motion_img
+                folder, audio_path, fr, count, last = record_event(
+                    args.camera, img, noise_cutoff, delta, trigger_photo=TMP_PHOTO
+                )
+                jobs.put((folder, audio_path, fr, count))
+                log.info("[Info] Processing & uploading in background. Resuming surveillance...")
+                if last is not None:
+                    prev = last
+            else:
+                rapid_triggers = 0
 
-                    if current_diff <= delta:
-                        consecutive_calm += 1
-                    else:
-                        consecutive_calm = 0
+            if args.interval > 0:
+                sleep(args.interval)
 
-                # If environment remains calm for 3 consecutive frames, stop recording!
-                if consecutive_calm >= 3:
-                    print(f"\nMotion stopped. Total captured: {photo_index} photos.")
-                    break
+    except KeyboardInterrupt:
+        log.info("\n\n[Info] Security camera stopped by user.")
+    finally:
+        run_cmd(["termux-wake-unlock"], timeout=10)
+        run_cmd(["termux-microphone-record", "-q"], timeout=15)
+        remove_if_exists(TMP_PHOTO)
+        if not jobs.empty() or worker.is_alive():
+            log.info("Finishing pending uploads (Ctrl+C again to skip)...")
+            try:
+                jobs.put(None)
+                worker.join(timeout=120)
+            except KeyboardInterrupt:
+                pass
+        print("Device resources released. Goodbye!")
 
-                # Safety break in case an event lasts too long (max 300 photos per event)
-                if photo_index >= 300:
-                    break
 
-            end = time()
-            delTime = max(1.0, end - start)
-            fr = max(1.0, round(photo_index / delTime, 1))
-
-            # Stop microphone recording before handing off to the background thread
-            processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "")
-
-            # Spin off background thread for FFmpeg and Telegram uploads (Non-blocking!)
-            bg_thread = threading.Thread(
-                target=background_event_processor,
-                args=(event_folder, audio_path, args, fr),
-                daemon=True
-            )
-            bg_thread.start()
-
-            print('\n[Info] Processing & uploading in background. Resuming surveillance instantly...')
-
-            delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
-            if last_img is not None:
-                imgArr = [last_img]
-
-except KeyboardInterrupt:
-    print("\n\n[Info] Security camera stopped by user safely.")
-    run("termux-wake-unlock", shell=True)
-    processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "")
-    for temp_file in ('img_set.jpeg', 'photo.jpeg'):
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
-    print("Device resources released. Goodbye!")
+if __name__ == "__main__":
+    main()
