@@ -9,7 +9,7 @@ This script continuously monitors your environment by capturing and comparing fr
 ## ✨ Features
 
 * **Zero-Config Smart Calibration:** Automatically waits until you place the phone down and leave the frame, then learns the camera's sensor noise and ambient lighting to set an optimal motion-detection threshold.
-* **Dynamic Event-Triggered Recording:** Instead of capturing a fixed number of photos, the camera smartly records as long as motion persists and automatically stops when the environment becomes calm.
+* **Dynamic Event-Triggered Recording:** The camera smartly records as long as motion persists and automatically stops when the environment becomes calm.
 * **Background Multithreading:** Video conversion (`ffmpeg`) and Telegram uploads run in a background thread, allowing the camera to resume surveillance instantly without missing any activity.
 * **Video Generation & Audio:** Automatically merges captured frames and `.aac` audio into a timestamped `.mp4` video.
 * **SMS & Phone Call Alerts:** Immediately sends an SMS or places a phone call to your number upon detecting an intruder.
