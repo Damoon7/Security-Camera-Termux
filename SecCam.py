@@ -37,17 +37,26 @@ def processCommand(command, shellVal, stout, sterr, err):
         process = Popen(command, shell=shellVal, stdout=stout, stderr=sterr)
         process.communicate()
     except Exception:
-        print(err)
+        if err:
+            print(err)
+
+
+def process_image_file(filepath):
+    if not os.path.exists(filepath):
+        return None
+    try:
+        with Image.open(filepath) as img:
+            # Resize, convert to grayscale, and apply Gaussian blur to reduce point sensor noise
+            return img.resize((436, 580)).convert('L').filter(ImageFilter.GaussianBlur(radius=2))
+    except Exception:
+        return None
 
 
 def take_processed_photo(camera_id, filename):
-    processCommand(f"termux-camera-photo -c {camera_id} {filename}", True, PIPE, PIPE, "Can't take photo")
-    if not os.path.exists(filename):
-        return None
-    with Image.open(filename) as img:
-        # Resize, convert to grayscale, and apply Gaussian blur to reduce point sensor noise
-        processed = img.resize((436, 580)).convert('L').filter(ImageFilter.GaussianBlur(radius=2))
-    os.remove(filename)
+    processCommand(f'termux-camera-photo -c {camera_id} "{filename}"', True, PIPE, PIPE, "Can't take photo")
+    processed = process_image_file(filename)
+    if os.path.exists(filename):
+        os.remove(filename)
     return processed
 
 
@@ -151,16 +160,20 @@ def send_to_telegram(Chat_ID, Bot_Token, filepath, media_type="photo"):
 def background_event_processor(event_folder, audio_path, args, fr):
     """Handles video conversion and Telegram uploads in the background thread."""
     video_path = os.path.join(event_folder, f"{event_folder}.mp4")
-    
-    # Stop microphone recording in background
-    processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "Can't stop audio recorder!")
 
     if args.video == 1:
-        ffmpeg_cmd = (
-            f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
-            f"-i '{audio_path}' -c:v libx264 -tune stillimage -c:a aac -b:a 192k "
-            f"-pix_fmt yuv420p -shortest '{video_path}'"
-        )
+        if os.path.exists(audio_path):
+            ffmpeg_cmd = (
+                f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
+                f"-i '{audio_path}' -vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' "
+                f"-c:v libx264 -tune stillimage -c:a aac -b:a 192k -pix_fmt yuv420p -shortest '{video_path}'"
+            )
+        else:
+            ffmpeg_cmd = (
+                f"ffmpeg -y -framerate {fr} -pattern_type glob -i '{event_folder}/*.jpeg' "
+                f"-vf 'scale=trunc(iw/2)*2:trunc(ih/2)*2' "
+                f"-c:v libx264 -tune stillimage -pix_fmt yuv420p '{video_path}'"
+            )
         processCommand(ffmpeg_cmd, True, PIPE, PIPE, "Can't convert to video")
 
     if args.chatid is not None and args.bottoken is not None:
@@ -174,7 +187,8 @@ def background_event_processor(event_folder, audio_path, args, fr):
         photos = [x for x in sorted(os.listdir(event_folder)) if x.endswith(".jpeg")]
         for x in photos:
             filepath = os.path.join(event_folder, x)
-            send_to_telegram(args.chatid, args.bottoken, filepath, "photo")
+            if not send_to_telegram(args.chatid, args.bottoken, filepath, "photo"):
+                break
 
         if args.video == 1 and os.path.exists(video_path):
             send_to_telegram(args.chatid, args.bottoken, video_path, "video")
@@ -204,14 +218,14 @@ run("termux-wake-lock", shell=True)
 
 print('Setting up the device (place phone in position)...\n')
 
-delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
-if last_img is None:
-    last_img = take_processed_photo(args.camera, 'photo.jpeg')
-
-imgArr = [last_img]
-sleep(1)
-
 try:
+    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+    if last_img is None:
+        last_img = take_processed_photo(args.camera, 'photo.jpeg')
+
+    imgArr = [last_img]
+    sleep(1)
+
     while True:
         new_img = take_processed_photo(args.camera, 'photo.jpeg')
         if new_img is None:
@@ -239,7 +253,7 @@ try:
             audio_path = os.path.join(event_folder, f"{event_folder}.aac")
 
             processCommand(f'termux-microphone-record -f "{audio_path}" -e aac', True, DEVNULL, STDOUT, "Can't record audio")
-            
+
             # Dynamic Capture Loop (Records until motion stops)
             start = time()
             photo_index = 0
@@ -251,24 +265,25 @@ try:
                 now = datetime.now().strftime("%Y-%m-%d_%H%M%S")
                 photo_path = os.path.join(event_folder, f"{now}_{photo_index:03d}.jpeg")
                 print(f"Recording event... captured: {photo_index} photos   ", end="\r")
-                
+
                 processCommand(f'termux-camera-photo -c {args.camera} "{photo_path}"', True, PIPE, PIPE, "Can't take photo")
-                
-                current_motion_img = take_processed_photo(args.camera, 'photo_check.jpeg')
+
+                # Process the captured evidence photo directly in memory (avoids taking a second dummy photo)
+                current_motion_img = process_image_file(photo_path)
                 if current_motion_img is not None:
                     current_diff = dif_of_images(prev_motion_img, current_motion_img, noise_cutoff)
                     prev_motion_img = current_motion_img
-                    
+
                     if current_diff <= delta:
                         consecutive_calm += 1
                     else:
                         consecutive_calm = 0
-                
+
                 # If environment remains calm for 3 consecutive frames, stop recording!
                 if consecutive_calm >= 3:
                     print(f"\nMotion stopped. Total captured: {photo_index} photos.")
                     break
-                
+
                 # Safety break in case an event lasts too long (max 300 photos per event)
                 if photo_index >= 300:
                     break
@@ -277,12 +292,19 @@ try:
             delTime = max(1.0, end - start)
             fr = max(1.0, round(photo_index / delTime, 1))
 
+            # Stop microphone recording before handing off to the background thread
+            processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "")
+
             # Spin off background thread for FFmpeg and Telegram uploads (Non-blocking!)
-            bg_thread = threading.Thread(target=background_event_processor, args=(event_folder, audio_path, args, fr))
+            bg_thread = threading.Thread(
+                target=background_event_processor,
+                args=(event_folder, audio_path, args, fr),
+                daemon=True
+            )
             bg_thread.start()
 
             print('\n[Info] Processing & uploading in background. Resuming surveillance instantly...')
-            
+
             delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
             if last_img is not None:
                 imgArr = [last_img]
@@ -291,4 +313,7 @@ except KeyboardInterrupt:
     print("\n\n[Info] Security camera stopped by user safely.")
     run("termux-wake-unlock", shell=True)
     processCommand("termux-microphone-record -q", True, DEVNULL, STDOUT, "")
+    for temp_file in ('img_set.jpeg', 'photo.jpeg'):
+        if os.path.exists(temp_file):
+            os.remove(temp_file)
     print("Device resources released. Goodbye!")
