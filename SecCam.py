@@ -10,6 +10,8 @@ Key Features:
   - Preserves the initial trigger photo as the first evidence frame (_001.jpeg).
   - No shell=True: every command is an argv list (injection-proof).
   - Stale-photo protection: temp photo is deleted before every capture to prevent false negatives.
+  - Dynamic threshold: re-tuned every --adapt-minutes from calm frames only (smoothed, clamped
+    to 0.5x-2x of the last full calibration, every change logged).
   - Auto-recalibration safeguard against persistent noise / ambient light shifts.
   - Timeouts on all Termux commands to prevent camera lockups.
   - Single background worker queue for orderly uploads.
@@ -97,6 +99,8 @@ def validate_args(args):
         sys.exit("Error: both chat id and bot token are required for Telegram")
     if args.video not in (0, 1):
         sys.exit("Error: --video must be 0 or 1")
+    if args.adapt_minutes < 0:
+        sys.exit("Error: --adapt-minutes cannot be negative")
 
 
 # --------------------------------------------------------------------------- #
@@ -170,6 +174,34 @@ def prepare_tg_photo(filepath, max_dim=1920, quality=82):
 # --------------------------------------------------------------------------- #
 # Calibration
 # --------------------------------------------------------------------------- #
+def compute_threshold(img_array, sensitivity=100):
+    """Learn (threshold, noise_cutoff) from a window of still frames (>= 3)."""
+    pairs = [(x, y) for x in range(len(img_array)) for y in range(x + 1, len(img_array))]
+    # Subsample pixels per pair so peak memory stays low on phones
+    flat = np.concatenate([get_normalized_diff(img_array[x], img_array[y]).ravel()[::2]
+                           for x, y in pairs])
+    noise_998 = float(np.percentile(flat, 99.8))
+    noise_995 = float(np.percentile(flat, 99.5))
+    del flat
+    noise_cutoff = max(7.0, noise_998 * 1.35)
+
+    probe_delta = [dif_of_images(img_array[x], img_array[y], max(5.0, noise_995)) for x, y in pairs]
+    delta = [dif_of_images(img_array[x], img_array[y], noise_cutoff) for x, y in pairs]
+
+    maxdel = max(delta)
+    std = stdev(delta) if len(delta) > 1 else 0.0
+    probe_max = max(probe_delta)
+    probe_std = stdev(probe_delta) if len(probe_delta) > 1 else 0.0
+
+    statistical_bound = int(maxdel * 2.5 + 6.0 * std + probe_max * 1.5 + 3.0 * probe_std)
+    area_bound = int(500 * noise_cutoff)
+    base_threshold = max(statistical_bound, area_bound)
+
+    sensitivity = max(1, sensitivity)
+    threshold = max(1, int(base_threshold * (100.0 / sensitivity)))
+    return threshold, noise_cutoff
+
+
 def setup_num(camera_id, sensitivity=100, min_stable_frames=12, max_photos=200):
     img_array = []
     p995_history = []
@@ -215,32 +247,73 @@ def setup_num(camera_id, sensitivity=100, min_stable_frames=12, max_photos=200):
         if stable_count < min_stable_frames:
             sleep(1)
 
-    pairs = [(x, y) for x in range(len(img_array)) for y in range(x + 1, len(img_array))]
-    pair_diffs = [get_normalized_diff(img_array[x], img_array[y]) for x, y in pairs]
-
-    flat = np.concatenate([d.ravel()[::2] for d in pair_diffs])
-    noise_998 = float(np.percentile(flat, 99.8))
-    noise_995 = float(np.percentile(flat, 99.5))
-    del flat, pair_diffs
-    noise_cutoff = max(7.0, noise_998 * 1.35)
-
-    probe_delta = [dif_of_images(img_array[x], img_array[y], max(5.0, noise_995)) for x, y in pairs]
-    delta = [dif_of_images(img_array[x], img_array[y], noise_cutoff) for x, y in pairs]
-
-    maxdel = max(delta)
-    std = stdev(delta) if len(delta) > 1 else 0.0
-    probe_max = max(probe_delta)
-    probe_std = stdev(probe_delta) if len(probe_delta) > 1 else 0.0
-
-    statistical_bound = int(maxdel * 2.5 + 6.0 * std + probe_max * 1.5 + 3.0 * probe_std)
-    area_bound = int(500 * noise_cutoff)
-    base_threshold = max(statistical_bound, area_bound)
-
-    sensitivity = max(1, sensitivity)
-    threshold = max(1, int(base_threshold * (100.0 / sensitivity)))
-
+    threshold, noise_cutoff = compute_threshold(img_array, sensitivity)
     log.info("\nSet up in %d photos! (Cutoff: %.1f | Thr: %s)", total_taken, noise_cutoff, f"{threshold:,}")
     return threshold, noise_cutoff, img_array[-1]
+
+
+class ThresholdAdapter:
+    """Slowly re-learns threshold and noise cutoff while running.
+
+    Only a contiguous run of calm frames (difference below half the threshold) is used,
+    so frames containing motion are never learned. Changes are smoothed and clamped to
+    0.5x..2x of the last full calibration, so sensitivity cannot drift away unnoticed.
+    """
+    WINDOW = 12
+    CALM_FRACTION = 0.5
+    SMOOTHING = 0.5
+    MIN_FACTOR, MAX_FACTOR = 0.5, 2.0
+
+    def __init__(self, sensitivity, minutes, delta, cutoff):
+        self.sensitivity = sensitivity
+        self.interval = max(0.0, minutes) * 60.0
+        self.enabled = self.interval > 0
+        self.reset_base(delta, cutoff)
+
+    def reset_base(self, delta, cutoff):
+        """Called after a full (re)calibration: new reference values, empty window."""
+        self.base_delta = float(delta)
+        self.base_cutoff = float(cutoff)
+        self.frames = []
+        self.last_adapt = time()
+
+    def clear(self):
+        """Called after an event: frames around an event must never be learned."""
+        self.frames = []
+
+    def observe(self, img, dif, delta):
+        if not self.enabled:
+            return
+        if dif <= delta * self.CALM_FRACTION:
+            self.frames.append(img)
+            if len(self.frames) > self.WINDOW:
+                self.frames.pop(0)
+        else:
+            self.frames = []  # window must be a contiguous calm run
+
+    def maybe_adapt(self, delta, cutoff):
+        if (not self.enabled or len(self.frames) < self.WINDOW
+                or time() - self.last_adapt < self.interval):
+            return delta, cutoff
+        try:
+            new_thr, new_cut = compute_threshold(self.frames, self.sensitivity)
+        except Exception:
+            log.exception("Threshold adaptation failed; keeping current values")
+            self.frames = []
+            self.last_adapt = time()
+            return delta, cutoff
+
+        def clamp(value, base):
+            return min(max(value, base * self.MIN_FACTOR), base * self.MAX_FACTOR)
+
+        a = self.SMOOTHING
+        adapted_thr = max(1, int(a * clamp(new_thr, self.base_delta) + (1 - a) * delta))
+        adapted_cut = a * clamp(new_cut, self.base_cutoff) + (1 - a) * cutoff
+        log.info("\nThreshold adapted: %s -> %s (cutoff %.1f -> %.1f)",
+                 f"{int(delta):,}", f"{adapted_thr:,}", cutoff, adapted_cut)
+        self.frames = []
+        self.last_adapt = time()
+        return adapted_thr, adapted_cut
 
 
 # --------------------------------------------------------------------------- #
@@ -505,6 +578,8 @@ def parse_args():
                    type=int, default=20)
     p.add_argument("--interval", help="Extra seconds to sleep between frames (saves battery)",
                    type=float, default=0.0)
+    p.add_argument("--adapt-minutes", type=float, default=15.0,
+                   help="Re-tune threshold from calm frames every N minutes (default: 15, 0 = off)")
     p.add_argument("--log", help="Log file path (default: seccam.log)", default="seccam.log")
     p.add_argument("--no-telegram", action="store_true",
                    help="Run without Telegram and skip the credentials prompt")
@@ -545,6 +620,7 @@ def main():
         delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
         prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
         sleep(1)
+        adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
 
         fails = 0
         while True:
@@ -565,6 +641,7 @@ def main():
             dif = dif_of_images(prev, img, noise_cutoff)
             prev = img
             status_line(dif, delta)
+            adapter.observe(img, dif, delta)
 
             if dif > delta:
                 rapid_triggers += 1
@@ -576,6 +653,7 @@ def main():
                     remove_if_exists(TMP_PHOTO)
                     delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
                     prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+                    adapter.reset_base(delta, noise_cutoff)
                     rapid_triggers = 0
                     continue
 
@@ -601,8 +679,10 @@ def main():
                 log.info("[Info] Processing & uploading in background. Resuming surveillance...")
                 if last is not None:
                     prev = last
+                adapter.clear()
             else:
                 rapid_triggers = 0
+                delta, noise_cutoff = adapter.maybe_adapt(delta, noise_cutoff)
 
             if args.interval > 0:
                 sleep(args.interval)
