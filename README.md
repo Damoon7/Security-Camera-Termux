@@ -8,7 +8,7 @@ The script continuously watches the room through the device camera. When movemen
 
 ## ✨ Key Features
 
-* **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated.
+* **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames (see *Automatic Calibration* below).
 * **Dynamic Event Recording:** Keeps recording while motion persists and stops once the scene calms down. The photo that triggered the alarm is always kept as the first evidence frame.
 * **Optimized Telegram Alerts:** Sends a downscaled keyframe album that uploads quickly even on slow mobile networks. If the photo upload fails, a plain text alert is sent instead.
 * **Call & SMS Notifications:** Sends an SMS and/or places a phone call, with a configurable cooldown to prevent notification spam.
@@ -143,10 +143,22 @@ Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary 
 | `--cooldown` | Minimum seconds between SMS/call alerts (does **not** limit Telegram) | `300` |
 | `--max-events` | Number of newest event folders to keep (`0` keeps all) | `20` |
 | `--interval` | Extra sleep in seconds between frames to reduce CPU and battery use | `0.0` |
+| `--adapt-minutes` | Re-tune the threshold from calm frames every N minutes (`0` turns it off) | `15` |
 | `--log` | Path to the rotating log file | `seccam.log` |
 | `--no-telegram` | Run without Telegram and skip the startup question about credentials | off |
 
 Both a chat ID and a bot token are required to enable Telegram. If only one is provided, the script exits with an error.
+
+---
+
+## 🎚️ Automatic Calibration
+
+The script keeps its motion threshold up to date in two ways:
+
+* **Gradual adaptation (`--adapt-minutes`, default 15):** camera noise changes with the light (day vs. night, a lamp turning on). Every N minutes the script re-learns the noise level, with no pause in monitoring. Only a continuous run of 12 very calm frames is used, never frames that contain motion, and the frames around an event are discarded. Each update is smoothed and limited to between 0.5x and 2x of the last full calibration, so sensitivity can't drift away unnoticed. Every change is written to the log, for example `Threshold adapted: 22,741 -> 34,111`. Use `--adapt-minutes 0` to turn it off.
+* **Emergency recalibration:** if the threshold is exceeded 3 times in a row with no calm frame in between (wind, flickering light, a bumped phone), the script assumes the old baseline no longer fits and repeats the full startup calibration. Monitoring is paused while this runs.
+
+Each adaptation takes a few seconds of processing on the phone, which delays one frame. On a very slow device you can raise the interval, for example `--adapt-minutes 30`.
 
 ---
 
@@ -182,6 +194,7 @@ python3 SecCam.py -v 1 -c 09120000000 --cooldown 180
 
 * Detection compares each frame with the previous one. A perfectly still object (for example, someone who stops moving in view) will not keep triggering, and very slow changes are absorbed as normal.
 * If the scene produces constant noise (wind, flickering light, trees), the script recalibrates itself automatically. Monitoring is paused for the few minutes this takes.
+* Gradual adaptation learns from calm frames only, but a very slow movement could still make the threshold a little less sensitive over time. Check `seccam.log` for `Threshold adapted` lines during the first nights.
 * Photo capture speed depends on the phone; expect several seconds per frame, so very fast movements can be missed.
 * Detection quality depends on camera placement, lighting, and phone model. Test it before relying on it.
 
