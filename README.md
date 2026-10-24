@@ -82,12 +82,16 @@ Create the file with an editor (`pkg install nano -y` if needed):
 nano ~/.seccam_env
 ```
 
-Put these two lines inside it, then save:
+Type or paste these two lines inside it (use your own values):
 
 ```
 export TG_BOT_TOKEN="123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 export TG_CHAT_ID="123456789"
 ```
+
+Then save and exit nano: press `Ctrl + X`, then `Y` (to confirm saving), then `Enter`.
+
+> 💡 In Termux, tap the **CTRL** key in the extra-keys row above the keyboard, then press `X`.
 
 Restrict access to the file and load it before each run (once per Termux session):
 
@@ -97,6 +101,17 @@ source ~/.seccam_env
 ```
 
 The `-ch` / `-bt` command-line options also work, but they take priority over the environment variables and are visible in your shell history.
+
+**What if the credentials aren't loaded?** The script never silently skips Telegram. If it finds no credentials at startup, it asks:
+
+```
+Telegram credentials not found. Continue WITHOUT Telegram alerts? [y/N]:
+```
+
+* Type `y` to run without Telegram.
+* Press `Enter` (or `n`) to type your bot token (hidden as you type) and chat ID right there. They are used for this run only and are not saved; use the private file above to make them permanent.
+
+When credentials are present, the script sends a short "✅ Security camera started" test message at startup, so a wrong token or chat ID shows up immediately instead of at the first alarm. Use `--no-telegram` to skip the question entirely. If the script runs without an interactive terminal (for example from an auto-start script), it can't ask, so it logs that Telegram is disabled and continues.
 
 ### 2. Run Surveillance
 
@@ -129,8 +144,9 @@ Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary 
 | `--max-events` | Number of newest event folders to keep (`0` keeps all) | `20` |
 | `--interval` | Extra sleep in seconds between frames to reduce CPU and battery use | `0.0` |
 | `--log` | Path to the rotating log file | `seccam.log` |
+| `--no-telegram` | Run without Telegram and skip the startup question about credentials | off |
 
-Both a chat ID and a bot token are required to enable Telegram.
+Both a chat ID and a bot token are required to enable Telegram. If only one is provided, the script exits with an error.
 
 ---
 
