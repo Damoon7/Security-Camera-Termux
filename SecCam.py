@@ -7,15 +7,15 @@ Key Features:
     then cleans them up (original high-res evidence is kept intact on disk).
   - If a Telegram photo upload fails, a plain text alert is sent instead.
   - If Telegram credentials are missing, asks at startup (or use --no-telegram to skip the question).
-  - Preserves the initial trigger photo as the first evidence frame (_001.jpeg).
+  - 2-frame motion confirmation: filters out single-frame autofocus/AE/OIS camera glitches on older
+    phones while still preserving both the initial trigger frame (_001.jpeg) and confirmation frame (_002.jpeg).
+  - Soft-threshold pixel differencing: prevents thermal sensor noise drift from causing cliff-edge spikes.
   - No shell=True: every command is an argv list (injection-proof).
   - Stale-photo protection: temp photo is deleted before every capture to prevent false negatives.
-  - Dynamic threshold: re-tuned every --adapt-minutes from calm frames only (smoothed, clamped
-    to 0.5x-2x of the last full calibration, every change logged).
+  - Dynamic threshold: re-tuned every --adapt-minutes from calm frames (clamped to 1.0x-2.5x of
+    initial calibration so it never undercuts your sensitivity setting).
   - Auto-recalibration safeguard against persistent noise / ambient light shifts.
-  - Telegram status messages (--status-alerts) and optional heartbeat (--heartbeat-hours) so you
-    know what the camera is doing while you are away: start, recalibration, camera trouble,
-    low battery / charger changes, stop.
+  - Telegram status messages (--status-alerts) and optional heartbeat (--heartbeat-hours).
   - Timeouts on all Termux commands to prevent camera lockups.
   - Single background worker queue for orderly uploads.
   - Cooldowns on SMS/call alerts & automatic disk pruning for old events.
@@ -45,6 +45,7 @@ log = logging.getLogger("seccam")
 
 EVENTS_DIR = "events"
 TMP_PHOTO = "photo_tmp.jpeg"
+TRIGGER_PHOTO = "photo_trigger.jpeg"
 PHOTO_TIMEOUT = 40          # seconds for a single termux-camera-photo call
 MAX_PHOTOS_PER_EVENT = 300
 MAX_TG_SAMPLES_NO_VIDEO = 6
@@ -175,8 +176,10 @@ def get_normalized_diff(image1, image2):
 
 def dif_of_images(image1, image2, noise_cutoff=10.0):
     diff = get_normalized_diff(image1, image2)
-    significant = np.where(diff > noise_cutoff, diff, 0)
-    return int(np.sum(significant))
+    # Soft thresholding: sum only the excess above noise_cutoff so tiny thermal/ISO
+    # noise increases never cause a discontinuous cliff-edge jump.
+    excess = np.maximum(0.0, diff - noise_cutoff)
+    return int(np.sum(excess))
 
 
 def process_image_file(filepath):
@@ -186,8 +189,8 @@ def process_image_file(filepath):
         with Image.open(filepath) as img:
             img = ImageOps.exif_transpose(img)
             img = img.convert("L")
-            img.thumbnail((580, 580))  # keeps aspect ratio
-            return img.filter(ImageFilter.GaussianBlur(radius=2))
+            img.thumbnail((320, 320))  # absorbs 1-2px OIS/AF micro-shifts on older phones
+            return img.filter(ImageFilter.GaussianBlur(radius=3))
     except Exception:
         return None
 
@@ -243,7 +246,7 @@ def compute_threshold(img_array, sensitivity=100):
     noise_998 = float(np.percentile(flat, 99.8))
     noise_995 = float(np.percentile(flat, 99.5))
     del flat
-    noise_cutoff = max(7.0, noise_998 * 1.35)
+    noise_cutoff = max(7.0, noise_998 * 1.4)
 
     probe_delta = [dif_of_images(img_array[x], img_array[y], max(5.0, noise_995)) for x, y in pairs]
     delta = [dif_of_images(img_array[x], img_array[y], noise_cutoff) for x, y in pairs]
@@ -253,8 +256,8 @@ def compute_threshold(img_array, sensitivity=100):
     probe_max = max(probe_delta)
     probe_std = stdev(probe_delta) if len(probe_delta) > 1 else 0.0
 
-    statistical_bound = int(maxdel * 2.5 + 6.0 * std + probe_max * 1.5 + 3.0 * probe_std)
-    area_bound = int(500 * noise_cutoff)
+    statistical_bound = int(maxdel * 3.0 + 6.0 * std + probe_max * 1.5 + 3.0 * probe_std)
+    area_bound = int(200 * noise_cutoff)
     base_threshold = max(statistical_bound, area_bound)
 
     sensitivity = max(1, sensitivity)
@@ -315,14 +318,14 @@ def setup_num(camera_id, sensitivity=100, min_stable_frames=12, max_photos=200):
 class ThresholdAdapter:
     """Slowly re-learns threshold and noise cutoff while running.
 
-    Only a contiguous run of calm frames (difference below half the threshold) is used,
-    so frames containing motion are never learned. Changes are smoothed and clamped to
-    0.5x..2x of the last full calibration, so sensitivity cannot drift away unnoticed.
+    Clamped to 1.0x..2.5x of the calibrated baseline so thermal sensor warm-up can raise the
+    threshold when needed, but calm periods can never undercut the initial calibration or undo
+    a lowered --sensitivity setting.
     """
     WINDOW = 12
-    CALM_FRACTION = 0.5
+    CALM_FRACTION = 0.85
     SMOOTHING = 0.5
-    MIN_FACTOR, MAX_FACTOR = 0.5, 2.0
+    MIN_FACTOR, MAX_FACTOR = 1.0, 2.5
 
     def __init__(self, sensitivity, minutes, delta, cutoff):
         self.sensitivity = sensitivity
@@ -369,8 +372,11 @@ class ThresholdAdapter:
         a = self.SMOOTHING
         adapted_thr = max(1, int(a * clamp(new_thr, self.base_delta) + (1 - a) * delta))
         adapted_cut = a * clamp(new_cut, self.base_cutoff) + (1 - a) * cutoff
-        log.info("\nThreshold adapted: %s -> %s (cutoff %.1f -> %.1f)",
-                 f"{int(delta):,}", f"{adapted_thr:,}", cutoff, adapted_cut)
+        if abs(adapted_thr - int(delta)) >= max(10, int(delta * 0.02)):
+            log.info("\nThreshold adapted: %s -> %s (cutoff %.1f -> %.1f)",
+                     f"{int(delta):,}", f"{adapted_thr:,}", cutoff, adapted_cut)
+        else:
+            adapted_thr = int(delta)
         self.frames = []
         self.last_adapt = time()
         return adapted_thr, adapted_cut
@@ -508,7 +514,7 @@ def worker_loop(q, args):
 # --------------------------------------------------------------------------- #
 # Event recording
 # --------------------------------------------------------------------------- #
-def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
+def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, second_photo=None):
     stamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
     folder = os.path.join(EVENTS_DIR, stamp)
     os.makedirs(folder, exist_ok=True)
@@ -522,15 +528,16 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
     consecutive_calm = 0
     prev_img = first_img
 
-    # Preserve the initial trigger photo as the first evidence frame (_001.jpeg)
-    if trigger_photo and os.path.exists(trigger_photo):
-        first_frame_path = os.path.join(folder, f"{stamp}_{photo_index + 1:03d}.jpeg")
-        try:
-            shutil.move(trigger_photo, first_frame_path)
-            photo_index += 1
-        except Exception as exc:
-            log.warning("Could not save trigger photo: %s", exc)
-            remove_if_exists(trigger_photo)
+    # Preserve initial trigger and confirmation frames (_001.jpeg and _002.jpeg)
+    for saved_tmp in (trigger_photo, second_photo):
+        if saved_tmp and os.path.exists(saved_tmp):
+            frame_path = os.path.join(folder, f"{stamp}_{photo_index + 1:03d}.jpeg")
+            try:
+                shutil.move(saved_tmp, frame_path)
+                photo_index += 1
+            except Exception as exc:
+                log.warning("Could not save initial photo: %s", exc)
+                remove_if_exists(saved_tmp)
 
     while photo_index < MAX_PHOTOS_PER_EVENT:
         photo_index += 1
@@ -563,9 +570,6 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
     return folder, audio_path, fr, photo_index, prev_img
 
 
-# --------------------------------------------------------------------------- #
-# Main
-# --------------------------------------------------------------------------- #
 # --------------------------------------------------------------------------- #
 # Status messages (Telegram)
 # --------------------------------------------------------------------------- #
@@ -709,7 +713,6 @@ def telegram_selftest(args):
     """Verify Telegram at startup so wrong credentials are caught now, not at the first event."""
     require_curl()
     if args.status_alerts == "off":
-        # Status messages are off: only verify the token (no message is sent)
         ok = tg_request(args.bottoken, "getMe", retries=2, timeout=30)
         if ok:
             log.info("Telegram: enabled (token verified; chat id not tested because status alerts are off)")
@@ -748,7 +751,6 @@ def resolve_telegram(args):
         log.info("Telegram: disabled (confirmed)")
         return
 
-    # User wants Telegram: collect credentials right here (token is typed hidden, not saved anywhere)
     try:
         for attempt in range(3):
             token = getpass("Bot token (hidden, leave empty to cancel): ").strip()
@@ -908,19 +910,45 @@ def main():
                     continue
 
                 dif = dif_of_images(prev, img, noise_cutoff)
-                prev = img
                 status_line(dif, delta)
-                adapter.observe(img, dif, delta)
 
                 if dif > delta:
+                    # Save candidate trigger frame and take 1 immediate confirmation shot
+                    # to filter out single-frame autofocus/AE/OIS camera glitches.
+                    remove_if_exists(TRIGGER_PHOTO)
+                    if os.path.exists(TMP_PHOTO):
+                        try:
+                            shutil.move(TMP_PHOTO, TRIGGER_PHOTO)
+                        except OSError:
+                            remove_if_exists(TMP_PHOTO)
+
+                    verify_img = take_processed_photo(args.camera, keep_file=True)
+                    if verify_img is None:
+                        remove_if_exists(TRIGGER_PHOTO)
+                        prev = img
+                        continue
+
+                    # Compare confirmation frame against pre-trigger baseline (`prev`)
+                    verify_dif = dif_of_images(prev, verify_img, noise_cutoff)
+                    if verify_dif <= delta:
+                        log.info("\nIgnored single-frame camera glitch (Diff: %s, Verify: %s)",
+                                 f"{dif:,}", f"{verify_dif:,}")
+                        remove_if_exists(TRIGGER_PHOTO)
+                        remove_if_exists(TMP_PHOTO)
+                        prev = verify_img
+                        rapid_triggers = 0
+                        continue
+
+                    prev = verify_img
                     rapid_triggers += 1
-                    # 3 triggers back-to-back with no calm frame in between: likely persistent
-                    # noise or a lighting shift, so re-learn the baseline.
+                    # 3 confirmed triggers back-to-back with no calm frame in between:
+                    # persistent noise or lighting shift, so re-learn the baseline.
                     if rapid_triggers >= 3:
                         log.warning("\n⚠️ Persistent high difference detected (noise or lighting shift).")
                         log.info("Auto-recalibrating sensor baseline...")
                         notifier.send("⚠️ Persistent noise or lighting shift detected. Recalibrating: "
                                       "monitoring is paused until this finishes.")
+                        remove_if_exists(TRIGGER_PHOTO)
                         remove_if_exists(TMP_PHOTO)
                         rapid_triggers = 0
                         try:
@@ -962,7 +990,8 @@ def main():
                         log.info("SMS/call suppressed (cooldown active)")
 
                     folder, audio_path, fr, count, last = record_event(
-                        args.camera, img, noise_cutoff, delta, trigger_photo=TMP_PHOTO
+                        args.camera, verify_img, noise_cutoff, delta,
+                        trigger_photo=TRIGGER_PHOTO, second_photo=TMP_PHOTO
                     )
                     jobs.put((folder, audio_path, fr, count))
                     log.info("[Info] Processing & uploading in background. Resuming surveillance...")
@@ -970,7 +999,9 @@ def main():
                         prev = last
                     adapter.clear()
                 else:
+                    prev = img
                     rapid_triggers = 0
+                    adapter.observe(img, dif, delta)
                     new_delta, new_cutoff = adapter.maybe_adapt(delta, noise_cutoff)
                     if new_delta != delta:
                         notifier.send(f"🎚️ Threshold adapted: {int(delta):,} -> {int(new_delta):,}",
@@ -981,10 +1012,10 @@ def main():
                     sleep(args.interval)
 
             except Exception as exc:
-                # Never let one unexpected error end a long-running surveillance session
                 log.exception("Unexpected error in surveillance loop; continuing in 5s")
                 notifier.send_limited("loop_error", f"⚠️ Unexpected error: {type(exc).__name__}: {exc}", 1800)
                 run_cmd(["termux-microphone-record", "-q"], timeout=15)
+                remove_if_exists(TRIGGER_PHOTO)
                 remove_if_exists(TMP_PHOTO)
                 prev = None
                 sleep(5)
@@ -995,9 +1026,10 @@ def main():
     finally:
         run_cmd(["termux-wake-unlock"], timeout=10)
         run_cmd(["termux-microphone-record", "-q"], timeout=15)
+        remove_if_exists(TRIGGER_PHOTO)
         remove_if_exists(TMP_PHOTO)
         if stop_text:
-            notifier.flush(timeout=15)       # deliver anything still queued, in order
+            notifier.flush(timeout=15)
             notifier.send_now(stop_text)
         if not jobs.empty() or worker.is_alive():
             log.info("Finishing pending uploads (Ctrl+C again to skip)...")
