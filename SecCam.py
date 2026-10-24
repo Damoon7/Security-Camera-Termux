@@ -48,6 +48,12 @@ MAX_TG_SAMPLES_NO_VIDEO = 6
 MAX_TG_SAMPLES_WITH_VIDEO = 4
 TG_ALBUM_TIMEOUT = 240      # albums of full-size photos need a generous timeout
 TG_VIDEO_LIMIT = 49 * 1024 * 1024
+REQUIRED_TERMUX_BINARIES = (
+    "termux-camera-photo",
+    "termux-microphone-record",
+    "termux-wake-lock",
+    "termux-wake-unlock",
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -55,6 +61,7 @@ TG_VIDEO_LIMIT = 49 * 1024 * 1024
 # --------------------------------------------------------------------------- #
 def setup_logging(path):
     log.setLevel(logging.INFO)
+    log.handlers.clear()
     fmt = logging.Formatter("%(asctime)s %(levelname)s %(message)s", "%Y-%m-%d %H:%M:%S")
     fh = RotatingFileHandler(path, maxBytes=1_000_000, backupCount=3, encoding="utf-8")
     fh.setFormatter(fmt)
@@ -84,6 +91,39 @@ def remove_if_exists(path):
         pass
 
 
+def command_ok(res):
+    return res is not None and res.returncode == 0
+
+
+def describe_failure(res):
+    if res is None:
+        return "command did not run or timed out"
+    return (res.stderr or "").strip()[-200:] or f"exit code {res.returncode}"
+
+
+def require_curl():
+    if shutil.which("curl") is None:
+        raise RuntimeError("Telegram needs curl but it is not installed. Run: pkg install curl -y")
+
+
+def check_runtime_environment(args):
+    """Verify the required Termux utilities exist before the surveillance loop starts."""
+    needed = list(REQUIRED_TERMUX_BINARIES)
+    if args.sms:
+        needed.append("termux-sms-send")
+    if args.call:
+        needed.append("termux-telephony-call")
+    missing = [binary for binary in needed if shutil.which(binary) is None]
+    if missing:
+        raise RuntimeError(
+            "Missing required Termux tools: " + ", ".join(missing) +
+            ". Run: pkg install termux-api -y  (and make sure the separate Termux:API "
+            "Android app is installed too)."
+        )
+    if args.video == 1 and shutil.which("ffmpeg") is None:
+        raise RuntimeError("Video mode enabled but ffmpeg is not installed. Run: pkg install ffmpeg -y")
+
+
 def validate_args(args):
     if not re.fullmatch(r"\d+", args.camera):
         sys.exit("Error: --camera must be a number (0 or 1)")
@@ -101,6 +141,12 @@ def validate_args(args):
         sys.exit("Error: --video must be 0 or 1")
     if args.adapt_minutes < 0:
         sys.exit("Error: --adapt-minutes cannot be negative")
+    if args.cooldown < 0:
+        sys.exit("Error: --cooldown cannot be negative")
+    if args.max_events < 0:
+        sys.exit("Error: --max-events cannot be negative")
+    if args.interval < 0:
+        sys.exit("Error: --interval cannot be negative")
 
 
 # --------------------------------------------------------------------------- #
@@ -150,6 +196,15 @@ def take_processed_photo(camera_id, filename=TMP_PHOTO, keep_file=False):
     if not keep_file or processed is None:
         remove_if_exists(filename)
     return processed
+
+
+def check_camera(camera_id, attempts=2):
+    """Quick test shot so permission/app problems fail fast instead of after 200 slow retries."""
+    for _ in range(attempts):
+        if take_processed_photo(camera_id) is not None:
+            return True
+        sleep(2)
+    return False
 
 
 def prepare_tg_photo(filepath, max_dim=1920, quality=82):
@@ -508,6 +563,7 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
 # --------------------------------------------------------------------------- #
 def telegram_selftest(args):
     """Send a one-off message so wrong credentials are caught at startup, not at the first event."""
+    require_curl()
     ok = tg_request(args.bottoken, "sendMessage",
                     {"chat_id": args.chatid, "text": "✅ Security camera started"},
                     retries=2, timeout=30)
@@ -602,7 +658,23 @@ def _raise_interrupt(signum, frame):
 def main():
     args = parse_args()
     setup_logging(args.log)
-    resolve_telegram(args)
+    try:
+        check_runtime_environment(args)
+    except RuntimeError as exc:
+        log.error(str(exc))
+        raise SystemExit(1)
+
+    if not check_camera(args.camera):
+        log.error("Camera test failed. Make sure the Termux:API Android app is installed "
+                  "(not only the package) and that it has Camera permission.")
+        raise SystemExit(1)
+
+    try:
+        resolve_telegram(args)
+    except RuntimeError as exc:
+        log.error(str(exc))
+        raise SystemExit(1)
+
     signal.signal(signal.SIGTERM, _raise_interrupt)
     os.makedirs(EVENTS_DIR, exist_ok=True)
 
@@ -617,75 +689,101 @@ def main():
     rapid_triggers = 0
 
     try:
-        delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+        try:
+            delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+        except RuntimeError as exc:
+            log.error("Calibration failed: %s", exc)
+            raise SystemExit(1)
         prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
         sleep(1)
         adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
 
         fails = 0
         while True:
-            # keep_file=True so the photo can be preserved as evidence if it triggers
-            img = take_processed_photo(args.camera, keep_file=True)
-            if img is None:
-                fails += 1
-                if fails % 10 == 0:
-                    log.warning("Camera failed %d times in a row", fails)
-                sleep(min(30, fails))
-                continue
-            fails = 0
+            try:
+                # keep_file=True so the photo can be preserved as evidence if it triggers
+                img = take_processed_photo(args.camera, keep_file=True)
+                if img is None:
+                    fails += 1
+                    if fails % 10 == 0:
+                        log.warning("Camera failed %d times in a row", fails)
+                    sleep(min(30, fails))
+                    continue
+                fails = 0
 
-            if prev is None:
-                prev = img
-                continue
-
-            dif = dif_of_images(prev, img, noise_cutoff)
-            prev = img
-            status_line(dif, delta)
-            adapter.observe(img, dif, delta)
-
-            if dif > delta:
-                rapid_triggers += 1
-                # 3 triggers back-to-back with no calm frame in between: likely persistent
-                # noise or a lighting shift, so re-learn the baseline.
-                if rapid_triggers >= 3:
-                    log.warning("\n⚠️ Persistent high difference detected (noise or lighting shift).")
-                    log.info("Auto-recalibrating sensor baseline...")
-                    remove_if_exists(TMP_PHOTO)
-                    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
-                    prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
-                    adapter.reset_base(delta, noise_cutoff)
-                    rapid_triggers = 0
+                if prev is None:
+                    prev = img
                     continue
 
-                log.warning("\n🚨 An External Object Detected (Recording until motion stops...)")
+                dif = dif_of_images(prev, img, noise_cutoff)
+                prev = img
+                status_line(dif, delta)
+                adapter.observe(img, dif, delta)
 
-                if time() - last_alert >= args.cooldown:
-                    last_alert = time()
-                    stamp = datetime.now().strftime("%H:%M:%S")
-                    if args.sms:
-                        run_cmd(["termux-sms-send", "-n", args.sms,
-                                 f"An External Object Detected at {stamp}"], timeout=30)
-                        log.info("SMS sent to %s", args.sms)
-                    if args.call:
-                        run_cmd(["termux-telephony-call", args.call], timeout=30)
-                        log.info("Calling %s", args.call)
+                if dif > delta:
+                    rapid_triggers += 1
+                    # 3 triggers back-to-back with no calm frame in between: likely persistent
+                    # noise or a lighting shift, so re-learn the baseline.
+                    if rapid_triggers >= 3:
+                        log.warning("\n⚠️ Persistent high difference detected (noise or lighting shift).")
+                        log.info("Auto-recalibrating sensor baseline...")
+                        remove_if_exists(TMP_PHOTO)
+                        rapid_triggers = 0
+                        try:
+                            delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+                        except RuntimeError as exc:
+                            log.error("Recalibration failed (%s); keeping previous settings, "
+                                      "retrying in 60s", exc)
+                            prev = None
+                            sleep(60)
+                            continue
+                        prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+                        adapter.reset_base(delta, noise_cutoff)
+                        continue
+
+                    log.warning("\n🚨 An External Object Detected (Recording until motion stops...)")
+
+                    if time() - last_alert >= args.cooldown:
+                        last_alert = time()
+                        stamp = datetime.now().strftime("%H:%M:%S")
+                        if args.sms:
+                            res = run_cmd(["termux-sms-send", "-n", args.sms,
+                                           f"An External Object Detected at {stamp}"], timeout=30)
+                            if command_ok(res):
+                                log.info("SMS sent to %s", args.sms)
+                            else:
+                                log.warning("SMS to %s FAILED: %s", args.sms, describe_failure(res))
+                        if args.call:
+                            res = run_cmd(["termux-telephony-call", args.call], timeout=30)
+                            if command_ok(res):
+                                log.info("Calling %s", args.call)
+                            else:
+                                log.warning("Call to %s FAILED: %s", args.call, describe_failure(res))
+                    else:
+                        log.info("SMS/call suppressed (cooldown active)")
+
+                    folder, audio_path, fr, count, last = record_event(
+                        args.camera, img, noise_cutoff, delta, trigger_photo=TMP_PHOTO
+                    )
+                    jobs.put((folder, audio_path, fr, count))
+                    log.info("[Info] Processing & uploading in background. Resuming surveillance...")
+                    if last is not None:
+                        prev = last
+                    adapter.clear()
                 else:
-                    log.info("SMS/call suppressed (cooldown active)")
+                    rapid_triggers = 0
+                    delta, noise_cutoff = adapter.maybe_adapt(delta, noise_cutoff)
 
-                folder, audio_path, fr, count, last = record_event(
-                    args.camera, img, noise_cutoff, delta, trigger_photo=TMP_PHOTO
-                )
-                jobs.put((folder, audio_path, fr, count))
-                log.info("[Info] Processing & uploading in background. Resuming surveillance...")
-                if last is not None:
-                    prev = last
-                adapter.clear()
-            else:
-                rapid_triggers = 0
-                delta, noise_cutoff = adapter.maybe_adapt(delta, noise_cutoff)
+                if args.interval > 0:
+                    sleep(args.interval)
 
-            if args.interval > 0:
-                sleep(args.interval)
+            except Exception:
+                # Never let one unexpected error end a long-running surveillance session
+                log.exception("Unexpected error in surveillance loop; continuing in 5s")
+                run_cmd(["termux-microphone-record", "-q"], timeout=15)
+                remove_if_exists(TMP_PHOTO)
+                prev = None
+                sleep(5)
 
     except KeyboardInterrupt:
         log.info("\n\n[Info] Security camera stopped by user.")
