@@ -20,6 +20,7 @@ The script continuously watches the room through the device camera. When movemen
 
 1. **Install Termux & Termux:API:**
    Install both apps from **F-Droid** or **GitHub Releases**.
+   > ℹ️ You need **both** the Termux:API Android app *and* the `termux-api` package inside Termux (installed below). They are two separate things, and having only one of them is the most common setup problem.
    > ⚠️ **Important:** Do **not** use the Google Play Store version of Termux. It is deprecated and cannot communicate with `Termux:API`.
 
 2. **Grant Permissions:**
@@ -187,6 +188,22 @@ Builds an MP4 for each incident and places an alert call (at most one every 3 mi
 ```bash
 python3 SecCam.py -v 1 -c 09120000000 --cooldown 180
 ```
+
+---
+
+## 🛠️ Troubleshooting & Self-Checks
+
+At startup the script checks that the required Termux tools exist and takes one test photo. If something is wrong it stops with a clear message instead of failing silently:
+
+| Message | What to do |
+| :--- | :--- |
+| `Missing required Termux tools: ...` | Run `pkg install termux-api -y` (and `pkg install ffmpeg -y` for `-v 1`). Also install the separate Termux:API Android app. |
+| `Camera test failed ...` | Open Android Settings → Apps → Termux:API → Permissions and allow Camera. Make sure no other app is using the camera. |
+| `Telegram needs curl ...` | Run `pkg install curl -y`. |
+| `Calibration failed ...` | The camera returned no usable photos during setup. Check the camera test above and try again. |
+| `SMS to ... FAILED` / `Call to ... FAILED` | Grant the SMS / Phone permissions to Termux:API. The reason reported by Android is shown in the message. |
+
+While running, an unexpected error is logged to `seccam.log` and the script carries on after a few seconds instead of exiting. If a mid-run recalibration fails, it keeps the previous settings and retries later.
 
 ---
 
