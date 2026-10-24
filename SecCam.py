@@ -6,6 +6,7 @@ Key Features:
   - On-the-fly photo optimization: creates lightweight Full-HD JPEG copies for Telegram dispatch,
     then cleans them up (original high-res evidence is kept intact on disk).
   - If a Telegram photo upload fails, a plain text alert is sent instead.
+  - If Telegram credentials are missing, asks at startup (or use --no-telegram to skip the question).
   - Preserves the initial trigger photo as the first evidence frame (_001.jpeg).
   - No shell=True: every command is an argv list (injection-proof).
   - Stale-photo protection: temp photo is deleted before every capture to prevent false negatives.
@@ -25,6 +26,7 @@ import logging
 import threading
 from argparse import ArgumentParser
 from datetime import datetime
+from getpass import getpass
 from glob import glob
 from logging.handlers import RotatingFileHandler
 from statistics import stdev, median
@@ -431,6 +433,59 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None):
 # --------------------------------------------------------------------------- #
 # Main
 # --------------------------------------------------------------------------- #
+def telegram_selftest(args):
+    """Send a one-off message so wrong credentials are caught at startup, not at the first event."""
+    ok = tg_request(args.bottoken, "sendMessage",
+                    {"chat_id": args.chatid, "text": "✅ Security camera started"},
+                    retries=2, timeout=30)
+    if ok:
+        log.info("Telegram: enabled (test message sent)")
+    else:
+        log.warning("Telegram: test message FAILED. Check the token and chat id "
+                    "(and that you pressed Start in your bot). Alerts will still be attempted.")
+    return ok
+
+
+def resolve_telegram(args):
+    """Decide whether Telegram is on. If credentials are missing, ask instead of silently skipping."""
+    if args.chatid and args.bottoken:
+        telegram_selftest(args)
+        return
+
+    if getattr(args, "no_telegram", False):
+        log.info("Telegram: disabled (--no-telegram)")
+        return
+
+    if not sys.stdin.isatty():
+        log.warning("Telegram: disabled (no credentials found and no interactive terminal to ask)")
+        return
+
+    try:
+        answer = input("Telegram credentials not found. Continue WITHOUT Telegram alerts? [y/N]: ")
+    except EOFError:
+        answer = "y"
+    if answer.strip().lower() in ("y", "yes"):
+        log.info("Telegram: disabled (confirmed)")
+        return
+
+    # User wants Telegram: collect credentials right here (token is typed hidden, not saved anywhere)
+    try:
+        for attempt in range(3):
+            token = getpass("Bot token (hidden, leave empty to cancel): ").strip()
+            if not token:
+                log.info("Telegram: disabled (cancelled)")
+                return
+            chat = input("Chat ID: ").strip()
+            if re.fullmatch(r"\d+:[A-Za-z0-9_-]+", token) and re.fullmatch(r"-?\d+", chat):
+                args.bottoken, args.chatid = token, chat
+                telegram_selftest(args)
+                return
+            print("Invalid format (token looks like 123456:ABC-..., chat id is a number). Try again.")
+    except EOFError:
+        pass
+    log.warning("Telegram: disabled (no valid credentials entered)")
+
+
 def status_line(dif, delta):
     cl = datetime.now().strftime("%H:%M:%S")
     print(f"{cl} | Diff: {dif:,} / Thr: {int(delta):,}    ", end="\r")
@@ -451,12 +506,16 @@ def parse_args():
     p.add_argument("--interval", help="Extra seconds to sleep between frames (saves battery)",
                    type=float, default=0.0)
     p.add_argument("--log", help="Log file path (default: seccam.log)", default="seccam.log")
+    p.add_argument("--no-telegram", action="store_true",
+                   help="Run without Telegram and skip the credentials prompt")
     args = p.parse_args()
 
     if args.chatid is None:
         args.chatid = os.environ.get("TG_CHAT_ID")
     if args.bottoken is None:
         args.bottoken = os.environ.get("TG_BOT_TOKEN")
+    if args.no_telegram:
+        args.chatid = args.bottoken = None
     validate_args(args)
     return args
 
@@ -468,6 +527,7 @@ def _raise_interrupt(signum, frame):
 def main():
     args = parse_args()
     setup_logging(args.log)
+    resolve_telegram(args)
     signal.signal(signal.SIGTERM, _raise_interrupt)
     os.makedirs(EVENTS_DIR, exist_ok=True)
 
