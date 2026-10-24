@@ -3,6 +3,8 @@
 
 Key Features:
   - Video default is 0 (skips ffmpeg to save battery/CPU); sends keyframes as one Telegram album.
+  - Optimized MP4 encoding (-v 1): caps resolution at 1280p with H.264 veryfast/CRF 25 and
+    +faststart for low file size, minimal CPU heat, and instant Telegram streaming.
   - On-the-fly photo optimization: creates lightweight Full-HD JPEG copies for Telegram dispatch,
     then cleans them up (original high-res evidence is kept intact on disk).
   - If a Telegram photo upload fails, a plain text alert is sent instead.
@@ -465,14 +467,22 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count):
 def build_video(folder, audio_path, fr):
     video_path = os.path.join(folder, "event.mp4")
     has_audio = os.path.exists(audio_path) and os.path.getsize(audio_path) > 0
+    scale_filter = (
+        "scale='min(1280,iw)':'min(1280,ih)':force_original_aspect_ratio=decrease,"
+        "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+    )
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-framerate", str(fr),
            "-pattern_type", "glob", "-i", os.path.join(folder, "*.jpeg")]
     if has_audio:
         cmd += ["-i", audio_path]
-    cmd += ["-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-c:v", "libx264",
-            "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "10"]
+    cmd += [
+        "-vf", scale_filter,
+        "-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
+        "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "10",
+        "-movflags", "+faststart",
+    ]
     if has_audio:
-        cmd += ["-c:a", "aac", "-b:a", "128k", "-shortest"]
+        cmd += ["-c:a", "aac", "-b:a", "96k", "-shortest"]
     cmd.append(video_path)
     res = run_cmd(cmd, timeout=900)
     if res is None or res.returncode != 0 or not os.path.exists(video_path):
