@@ -11,6 +11,7 @@ The script continuously watches the room through the device camera. When movemen
 * **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames (see *Automatic Calibration* below).
 * **Dynamic Event Recording:** Keeps recording while motion persists and stops once the scene calms down. The photo that triggered the alarm is always kept as the first evidence frame.
 * **Optimized Telegram Alerts:** Sends a downscaled keyframe album that uploads quickly even on slow mobile networks. If the photo upload fails, a plain text alert is sent instead.
+* **Remote Status Updates:** Telegram messages tell you when the camera is ready, recalibrating, having camera trouble, low on battery, or stopped, plus an optional "still alive" heartbeat, so you always know what it is doing while you're away.
 * **Call & SMS Notifications:** Sends an SMS and/or places a phone call, with a configurable cooldown to prevent notification spam.
 * **Designed for Long-Running Use:** Sequential background task queue, automatic storage pruning, timeouts on all Termux commands, a rotating log file, and an optional frame interval to reduce CPU and battery usage.
 
@@ -112,7 +113,7 @@ Telegram credentials not found. Continue WITHOUT Telegram alerts? [y/N]:
 * Type `y` to run without Telegram.
 * Press `Enter` (or `n`) to type your bot token (hidden as you type) and chat ID right there. They are used for this run only and are not saved; use the private file above to make them permanent.
 
-When credentials are present, the script sends a short "✅ Security camera started" test message at startup, so a wrong token or chat ID shows up immediately instead of at the first alarm. Use `--no-telegram` to skip the question entirely. If the script runs without an interactive terminal (for example from an auto-start script), it can't ask, so it logs that Telegram is disabled and continues.
+When credentials are present, the script sends a short "starting" message at startup, so a wrong token or chat ID shows up immediately instead of at the first alarm. (With `--status-alerts off` it only verifies the token and sends no message.) Use `--no-telegram` to skip the question entirely. If the script runs without an interactive terminal (for example from an auto-start script), it can't ask, so it logs that Telegram is disabled and continues.
 
 ### 2. Run Surveillance
 
@@ -145,6 +146,8 @@ Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary 
 | `--max-events` | Number of newest event folders to keep (`0` keeps all) | `20` |
 | `--interval` | Extra sleep in seconds between frames to reduce CPU and battery use | `0.0` |
 | `--adapt-minutes` | Re-tune the threshold from calm frames every N minutes (`0` turns it off) | `15` |
+| `--status-alerts` | Telegram status messages: `off`, `important`, or `all` (see *Telegram Status Messages*) | `important` |
+| `--heartbeat-hours` | Send an "I'm alive" message every N hours (`0` = off) | `0` |
 | `--log` | Path to the rotating log file | `seccam.log` |
 | `--no-telegram` | Run without Telegram and skip the startup question about credentials | off |
 
@@ -160,6 +163,31 @@ The script keeps its motion threshold up to date in two ways:
 * **Emergency recalibration:** if the threshold is exceeded 3 times in a row with no calm frame in between (wind, flickering light, a bumped phone), the script assumes the old baseline no longer fits and repeats the full startup calibration. Monitoring is paused while this runs.
 
 Each adaptation takes a few seconds of processing on the phone, which delays one frame. On a very slow device you can raise the interval, for example `--adapt-minutes 30`.
+
+---
+
+## 📡 Telegram Status Messages
+
+When Telegram is enabled, the camera also reports what it is doing, so silence doesn't leave you guessing. Status messages are sent on their own thread, so they never slow down the camera or wait behind photo uploads.
+
+**`--status-alerts important` (default)**
+
+| Message | When |
+| :--- | :--- |
+| 🔧 Starting | The script started and is calibrating (step out of view) |
+| ✅ Monitoring started | Calibration finished; shows the threshold and battery |
+| ⚠️ Recalibrating / ✅ Recalibration done / ❌ failed | Emergency recalibration (monitoring is paused meanwhile) |
+| 📷 Camera failed N times / ✅ Camera is working again | The camera stopped returning photos (reported at most every 30 min) |
+| 🔋 Battery low | Battery at 20% and again at 10% while not charging |
+| 🔌 Charger disconnected / connected | Power source changed (checked every 5 minutes) |
+| ⚠️ Unexpected error | An internal error was caught; the script keeps running (at most every 30 min) |
+| 🛑 Stopped | Ctrl+C, or the system/terminal ended the script (shutdown, closed session) |
+
+**`--status-alerts all`** adds a "🚨 Motion detected, recording..." ping the moment an event starts (the photo album only arrives after the event ends) and every gradual threshold update. **`--status-alerts off`** sends no status messages. Motion alerts with photos are always sent.
+
+**Heartbeat (`--heartbeat-hours N`)** sends a short summary every N hours: uptime, events since start, threshold, battery and temperature. It is sent even when `--status-alerts off`, because it is its own option.
+
+> ⚠️ **A dead phone can't announce it.** If the battery dies, the power is cut, or Android force-kills the process, no code can send a message. The "Stopped" message is best-effort (it works when the system asks the script to end politely). The reliable signal is a **missing heartbeat**: if you expect one every 6 hours (`--heartbeat-hours 6`) and it doesn't arrive, something is wrong.
 
 ---
 
@@ -212,6 +240,7 @@ While running, an unexpected error is logged to `seccam.log` and the script carr
 * Detection compares each frame with the previous one. A perfectly still object (for example, someone who stops moving in view) will not keep triggering, and very slow changes are absorbed as normal.
 * If the scene produces constant noise (wind, flickering light, trees), the script recalibrates itself automatically. Monitoring is paused for the few minutes this takes.
 * Gradual adaptation learns from calm frames only, but a very slow movement could still make the threshold a little less sensitive over time. Check `seccam.log` for `Threshold adapted` lines during the first nights.
+* Status messages need a working internet connection. During an outage they are retried briefly and then dropped.
 * Photo capture speed depends on the phone; expect several seconds per frame, so very fast movements can be missed.
 * Detection quality depends on camera placement, lighting, and phone model. Test it before relying on it.
 
