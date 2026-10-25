@@ -2,8 +2,9 @@
 """Security Camera for Termux (hardened & optimized version).
 
 Key Features:
-  - Two-way Telegram control: /pause [min], /resume, /snap, /status, /calibrate,
-    /sensitivity <N>, /schedule <HH:MM-HH:MM|off>, /stop, /help.
+  - Interactive Telegram UI: auto-registers the official Telegram '/' command menu, displays a
+    persistent bottom control pad (ReplyKeyboardMarkup), and provides inline buttons
+    (InlineKeyboardMarkup) for pause durations, sensitivity presets, schedules, and stop confirmation.
   - Active hours schedule (--schedule HH:MM-HH:MM, e.g. 20:00-08:00) with automatic
     recalibration when entering the active window.
   - Video default is 0 (skips ffmpeg to save battery/CPU); sends keyframes as one Telegram album.
@@ -67,17 +68,102 @@ REQUIRED_TERMUX_BINARIES = (
 )
 
 HELP_TEXT = (
-    "🤖 Available Commands:\n"
+    "🤖 Control Panel & Commands:\n"
+    "Use the buttons below or type:\n"
     "/status - Show camera status & battery\n"
     "/snap - Take & send an instant photo\n"
-    "/pause [min] - Pause monitoring (e.g. /pause 20 or /pause)\n"
+    "/pause [min] - Pause monitoring (e.g. /pause 20)\n"
     "/resume - Resume monitoring immediately\n"
     "/calibrate - Recalibrate motion sensor now\n"
-    "/sensitivity <1-500> - Set sensitivity % (e.g. /sensitivity 80)\n"
-    "/schedule <HH:MM-HH:MM|off> - Set active hours (e.g. /schedule 20:00-08:00)\n"
-    "/stop - Safely stop the security camera\n"
-    "/help - Show this help message"
+    "/sensitivity <1-500> - Set sensitivity %\n"
+    "/schedule <HH:MM-HH:MM|off> - Set active hours\n"
+    "/stop - Safely stop the security camera"
 )
+
+BOT_COMMANDS_SPEC = [
+    {"command": "status", "description": "📊 Show status, threshold & battery"},
+    {"command": "snap", "description": "📸 Take an instant photo"},
+    {"command": "pause", "description": "⏸️ Pause monitoring (choose duration)"},
+    {"command": "resume", "description": "▶️ Resume monitoring now"},
+    {"command": "sensitivity", "description": "🎯 Adjust detection sensitivity"},
+    {"command": "schedule", "description": "🕒 Set active hours schedule"},
+    {"command": "calibrate", "description": "🔧 Recalibrate sensor baseline"},
+    {"command": "stop", "description": "🛑 Stop security camera"},
+    {"command": "help", "description": "🎛️ Show control panel & help"},
+]
+
+MAIN_REPLY_KEYBOARD = {
+    "keyboard": [
+        [{"text": "📸 Snap"}, {"text": "📊 Status"}],
+        [{"text": "⏸️ Pause"}, {"text": "▶️ Resume"}],
+        [{"text": "🎯 Sensitivity"}, {"text": "🕒 Schedule"}],
+        [{"text": "🔧 Calibrate"}, {"text": "🛑 Stop"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+}
+
+BUTTON_TEXT_MAP = {
+    "📸 snap": ("/snap", ""),
+    "📊 status": ("/status", ""),
+    "⏸️ pause": ("/pause_menu", ""),
+    "▶️ resume": ("/resume", ""),
+    "🎯 sensitivity": ("/sensitivity_menu", ""),
+    "🕒 schedule": ("/schedule_menu", ""),
+    "🔧 calibrate": ("/calibrate", ""),
+    "🛑 stop": ("/stop_ask", ""),
+}
+
+PAUSE_INLINE_KB = {
+    "inline_keyboard": [
+        [
+            {"text": "15m", "callback_data": "/pause 15"},
+            {"text": "30m", "callback_data": "/pause 30"},
+            {"text": "1h", "callback_data": "/pause 60"},
+            {"text": "2h", "callback_data": "/pause 120"},
+        ],
+        [
+            {"text": "♾️ Pause Indefinitely", "callback_data": "/pause"},
+            {"text": "▶️ Resume Now", "callback_data": "/resume"},
+        ],
+    ]
+}
+
+SENSITIVITY_INLINE_KB = {
+    "inline_keyboard": [
+        [
+            {"text": "50% (Low)", "callback_data": "/sensitivity 50"},
+            {"text": "75%", "callback_data": "/sensitivity 75"},
+            {"text": "100% (Default)", "callback_data": "/sensitivity 100"},
+        ],
+        [
+            {"text": "125%", "callback_data": "/sensitivity 125"},
+            {"text": "150% (High)", "callback_data": "/sensitivity 150"},
+        ],
+    ]
+}
+
+SCHEDULE_INLINE_KB = {
+    "inline_keyboard": [
+        [
+            {"text": "🌙 20:00 - 08:00", "callback_data": "/schedule 20:00-08:00"},
+            {"text": "🌙 22:00 - 07:00", "callback_data": "/schedule 22:00-07:00"},
+        ],
+        [
+            {"text": "🏢 08:00 - 17:00", "callback_data": "/schedule 08:00-17:00"},
+            {"text": "🟢 24/7 (Always On)", "callback_data": "/schedule off"},
+        ],
+    ]
+}
+
+STOP_CONFIRM_INLINE_KB = {
+    "inline_keyboard": [
+        [
+            {"text": "✅ Yes, Stop Camera", "callback_data": "/stop confirm"},
+            {"text": "❌ Cancel", "callback_data": "/cancel_stop"},
+        ]
+    ]
+}
 
 
 # --------------------------------------------------------------------------- #
@@ -655,11 +741,10 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, 
 
 
 # --------------------------------------------------------------------------- #
-# Status messages & Remote Control (Telegram)
+# Status messages & Interactive Remote Control (Telegram)
 # --------------------------------------------------------------------------- #
 class StatusNotifier:
-    """Sends short status messages on their own thread, so the camera loop never waits for the
-    network and status messages never queue behind big photo uploads."""
+    """Sends status messages and interactive keyboards on their own thread."""
 
     def __init__(self, args):
         self.token = args.bottoken
@@ -685,13 +770,15 @@ class StatusNotifier:
     def _clean(self, text):
         return text.replace(self.token, "***")[:1000]
 
-    def send(self, text, level="important", force=False):
+    def send(self, text, level="important", force=False, reply_markup=None):
         if self._wanted(level, force):
-            self._q.put(self._clean(text))
+            self._q.put((self._clean(text), reply_markup))
 
-    def reply(self, text):
+    def reply(self, text, reply_markup=None):
         """Always send direct replies to user commands regardless of --status-alerts mode."""
-        self.send(text, force=True)
+        if reply_markup is None:
+            reply_markup = MAIN_REPLY_KEYBOARD
+        self.send(text, force=True, reply_markup=reply_markup)
 
     def send_limited(self, key, text, min_interval=1800, level="important"):
         now = time()
@@ -699,16 +786,19 @@ class StatusNotifier:
             return
         if self._wanted(level, False):
             self._last_sent[key] = now
-            self._q.put(self._clean(text))
+            self._q.put((self._clean(text), None))
 
     def _run(self):
         while True:
-            text = self._q.get()
-            if text is None:
+            item = self._q.get()
+            if item is None:
                 return
+            text, markup = item
             try:
-                tg_request(self.token, "sendMessage", {"chat_id": self.chat, "text": text},
-                           retries=2, timeout=30)
+                fields = {"chat_id": self.chat, "text": text}
+                if markup is not None:
+                    fields["reply_markup"] = json.dumps(markup)
+                tg_request(self.token, "sendMessage", fields, retries=2, timeout=30)
             except Exception:
                 log.exception("Status message failed")
 
@@ -724,7 +814,7 @@ class StatusNotifier:
 
 
 class TelegramController:
-    """Polls Telegram for incoming bot commands from the authorized chat_id and wakes the main loop."""
+    """Polls Telegram for text commands, reply-keyboard button taps, and inline button callbacks."""
 
     def __init__(self, args, notifier):
         self.token = args.bottoken
@@ -746,6 +836,10 @@ class TelegramController:
         self.wake_event.wait(timeout=max(0.0, seconds))
         self.wake_event.clear()
 
+    def _register_bot_menu(self):
+        tg_request_raw(self.token, "setMyCommands",
+                       {"commands": json.dumps(BOT_COMMANDS_SPEC)}, retries=1, timeout=15)
+
     def _flush_old_updates(self):
         data = tg_request_raw(self.token, "getUpdates", {"offset": "-1", "timeout": "0"},
                               retries=1, timeout=15)
@@ -753,10 +847,20 @@ class TelegramController:
             return data["result"][-1]["update_id"] + 1
         return None
 
+    def _enqueue_ raw_command(self, text):
+        parts = text.strip().split(maxsplit=1)
+        if not parts:
+            return
+        cmd = parts[0].split("@")[0].lower()
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        self.commands.put((cmd, arg))
+        self.wake_event.set()
+
     def _poll_loop(self):
+        self._register_bot_menu()
         offset = self._flush_old_updates()
         while not self._stop:
-            fields = {"timeout": "20", "allowed_updates": json.dumps(["message"])}
+            fields = {"timeout": "20", "allowed_updates": json.dumps(["message", "callback_query"])}
             if offset is not None:
                 fields["offset"] = str(offset)
             data = tg_request_raw(self.token, "getUpdates", fields=fields, retries=1, timeout=30)
@@ -765,18 +869,37 @@ class TelegramController:
                 continue
             for upd in data["result"]:
                 offset = upd["update_id"] + 1
+
+                # 1. Handle Inline Button clicks (callback_query)
+                cb = upd.get("callback_query")
+                if cb:
+                    cb_msg = cb.get("message") or {}
+                    sender_chat = str((cb_msg.get("chat") or {}).get("id", ""))
+                    if sender_chat == self.chat:
+                        cb_id = cb.get("id")
+                        if cb_id:
+                            tg_request_raw(self.token, "answerCallbackQuery",
+                                           {"callback_query_id": str(cb_id)}, retries=1, timeout=10)
+                        cb_data = (cb.get("data") or "").strip()
+                        if cb_data.startswith("/"):
+                            self._enqueue_raw_command(cb_data)
+                    continue
+
+                # 2. Handle Text commands & Persistent Reply Keyboard taps
                 msg = upd.get("message") or {}
                 sender_chat = str((msg.get("chat") or {}).get("id", ""))
                 if sender_chat != self.chat:
                     continue
                 text = (msg.get("text") or "").strip()
-                if not text.startswith("/"):
+                if not text:
                     continue
-                parts = text.split(maxsplit=1)
-                cmd = parts[0].split("@")[0].lower()
-                arg = parts[1].strip() if len(parts) > 1 else ""
-                self.commands.put((cmd, arg))
-                self.wake_event.set()
+
+                mapped = BUTTON_TEXT_MAP.get(text.lower())
+                if mapped:
+                    self.commands.put(mapped)
+                    self.wake_event.set()
+                elif text.startswith("/"):
+                    self._enqueue_raw_command(text)
 
 
 def read_battery():
@@ -876,12 +999,17 @@ def telegram_selftest(args):
         if ok:
             log.info("Telegram: enabled (token verified; chat id not tested because status alerts are off)")
     else:
-        ok = tg_request(args.bottoken, "sendMessage",
-                        {"chat_id": args.chatid,
-                         "text": "🔧 Security camera is starting. Send /help anytime for remote commands."},
-                        retries=2, timeout=30)
+        ok = tg_request(
+            args.bottoken, "sendMessage",
+            {
+                "chat_id": args.chatid,
+                "text": "🔧 Security camera is starting. Control panel buttons are ready below.",
+                "reply_markup": json.dumps(MAIN_REPLY_KEYBOARD),
+            },
+            retries=2, timeout=30
+        )
         if ok:
-            log.info("Telegram: enabled (test message sent)")
+            log.info("Telegram: enabled (test message & control keyboard sent)")
     if not ok:
         log.warning("Telegram: connection test FAILED. Check the token and chat id "
                     "(and that you pressed Start in your bot). Alerts will still be attempted.")
@@ -1052,11 +1180,13 @@ def main():
             was_active = True
             notifier.send(f"✅ Monitoring started (camera {args.camera})\n"
                           f"Threshold: {int(delta):,}\n"
-                          f"Schedule: {format_schedule(schedule_parsed)}\n" + power.describe())
+                          f"Schedule: {format_schedule(schedule_parsed)}\n" + power.describe(),
+                          reply_markup=MAIN_REPLY_KEYBOARD)
         else:
             log.info("Outside active schedule (%s). Waiting in standby...", format_schedule(schedule_parsed))
             notifier.send(f"🌙 Standby: waiting for schedule window ({format_schedule(schedule_parsed)}).\n"
-                          + power.describe())
+                          + power.describe(),
+                          reply_markup=MAIN_REPLY_KEYBOARD)
             standby_logged = True
 
         fails = 0
@@ -1071,14 +1201,14 @@ def main():
                         force=True
                     )
 
-                # Process any incoming Telegram remote commands
+                # Process any incoming Telegram remote commands or button taps
                 recalibrate_requested = False
                 while not remote.commands.empty():
                     cmd, arg = remote.commands.get_nowait()
                     log.info("\n[Telegram Command] %s %s", cmd, arg)
 
-                    if cmd in ("/help", "/start"):
-                        notifier.reply(HELP_TEXT)
+                    if cmd in ("/help", "/start", "/menu"):
+                        notifier.reply(HELP_TEXT, reply_markup=MAIN_REPLY_KEYBOARD)
 
                     elif cmd == "/status":
                         power.poll(force=True)
@@ -1087,10 +1217,14 @@ def main():
                             paused_until, schedule_parsed, power
                         ))
 
+                    elif cmd == "/pause_menu":
+                        notifier.reply("⏸️ Choose how long to pause monitoring:",
+                                       reply_markup=PAUSE_INLINE_KB)
+
                     elif cmd == "/pause":
                         if not arg:
                             paused_until = float("inf")
-                            notifier.reply("⏸️ Monitoring paused indefinitely. Send /resume to continue.")
+                            notifier.reply("⏸️ Monitoring paused indefinitely. Tap ▶️ Resume to continue.")
                         else:
                             try:
                                 mins = float(arg)
@@ -1099,7 +1233,8 @@ def main():
                                 paused_until = time() + mins * 60.0
                                 notifier.reply(f"⏸️ Monitoring paused for {mins:g} minutes.")
                             except ValueError:
-                                notifier.reply("⚠️ Usage: /pause [minutes] (e.g. /pause 20 or /pause)")
+                                notifier.reply("⚠️ Choose a duration below or type /pause <minutes>:",
+                                               reply_markup=PAUSE_INLINE_KB)
 
                     elif cmd == "/resume":
                         paused_until = None
@@ -1107,8 +1242,8 @@ def main():
                             notifier.reply("▶️ Resuming monitoring...")
                         else:
                             notifier.reply(
-                                f"▶️ Pause cleared, but currently outside schedule ({format_schedule(schedule_parsed)}). "
-                                "Send /schedule off to monitor now."
+                                f"▶️ Pause cleared, but currently outside schedule ({format_schedule(schedule_parsed)}).",
+                                reply_markup=SCHEDULE_INLINE_KB
                             )
 
                     elif cmd in ("/snap", "/photo"):
@@ -1124,29 +1259,54 @@ def main():
                     elif cmd in ("/calibrate", "/recalibrate"):
                         recalibrate_requested = True
 
+                    elif cmd == "/sensitivity_menu":
+                        notifier.reply(
+                            f"🎯 Current sensitivity: {args.sensitivity}%\n"
+                            "Select a preset below or type /sensitivity <1-500>:",
+                            reply_markup=SENSITIVITY_INLINE_KB
+                        )
+
                     elif cmd == "/sensitivity":
-                        try:
-                            new_sens = int(arg)
-                            if not (1 <= new_sens <= 500):
-                                raise ValueError
-                            old_sens = args.sensitivity
-                            args.sensitivity = new_sens
-                            if delta is not None:
-                                delta = max(1, int(delta * (old_sens / float(new_sens))))
-                                if adapter is not None:
-                                    adapter.sensitivity = new_sens
-                                    adapter.reset_base(delta, noise_cutoff)
+                        if not arg:
                             notifier.reply(
-                                f"🎯 Sensitivity set to {new_sens}% "
-                                + (f"(new threshold: {int(delta):,})" if delta else "")
+                                f"🎯 Current sensitivity: {args.sensitivity}%\n"
+                                "Select a preset below or type /sensitivity <1-500>:",
+                                reply_markup=SENSITIVITY_INLINE_KB
                             )
-                        except ValueError:
-                            notifier.reply("⚠️ Usage: /sensitivity <1-500> (e.g. /sensitivity 80)")
+                        else:
+                            try:
+                                new_sens = int(arg)
+                                if not (1 <= new_sens <= 500):
+                                    raise ValueError
+                                old_sens = args.sensitivity
+                                args.sensitivity = new_sens
+                                if delta is not None:
+                                    delta = max(1, int(delta * (old_sens / float(new_sens))))
+                                    if adapter is not None:
+                                        adapter.sensitivity = new_sens
+                                        adapter.reset_base(delta, noise_cutoff)
+                                notifier.reply(
+                                    f"🎯 Sensitivity set to {new_sens}% "
+                                    + (f"(new threshold: {int(delta):,})" if delta else "")
+                                )
+                            except ValueError:
+                                notifier.reply("⚠️ Select a preset or type /sensitivity <1-500>:",
+                                               reply_markup=SENSITIVITY_INLINE_KB)
+
+                    elif cmd == "/schedule_menu":
+                        notifier.reply(
+                            f"🕒 Current schedule: {format_schedule(schedule_parsed)}\n"
+                            "Choose a schedule below or type /schedule HH:MM-HH:MM:",
+                            reply_markup=SCHEDULE_INLINE_KB
+                        )
 
                     elif cmd == "/schedule":
                         if not arg:
-                            notifier.reply(f"🕒 Current schedule: {format_schedule(schedule_parsed)}\n"
-                                           "Usage: /schedule HH:MM-HH:MM or /schedule off")
+                            notifier.reply(
+                                f"🕒 Current schedule: {format_schedule(schedule_parsed)}\n"
+                                "Choose a schedule below or type /schedule HH:MM-HH:MM:",
+                                reply_markup=SCHEDULE_INLINE_KB
+                            )
                         else:
                             try:
                                 schedule_parsed = parse_schedule(arg)
@@ -1154,14 +1314,24 @@ def main():
                                 notifier.reply(f"🕒 Schedule updated: {stand_msg}")
                                 standby_logged = False
                             except ValueError as exc:
-                                notifier.reply(f"⚠️ {exc}")
+                                notifier.reply(f"⚠️ {exc}", reply_markup=SCHEDULE_INLINE_KB)
+
+                    elif cmd == "/stop_ask":
+                        notifier.reply("⚠️ Are you sure you want to stop the security camera?",
+                                       reply_markup=STOP_CONFIRM_INLINE_KB)
+
+                    elif cmd == "/cancel_stop":
+                        notifier.reply("👍 Stop cancelled. Camera is still running.")
 
                     elif cmd == "/stop":
-                        STOP_REASON["text"] = "stopped remotely via Telegram (/stop)"
-                        raise KeyboardInterrupt
+                        if arg.lower() == "confirm":
+                            STOP_REASON["text"] = "stopped remotely via Telegram (/stop)"
+                            raise KeyboardInterrupt
+                        notifier.reply("⚠️ Confirm stopping the security camera:",
+                                       reply_markup=STOP_CONFIRM_INLINE_KB)
 
                     else:
-                        notifier.reply("❓ Unknown command. Send /help for available commands.")
+                        notifier.reply("❓ Unknown command. Use the buttons below or send /help.")
 
                 # Check if a timed pause has expired
                 if paused_until is not None and paused_until != float("inf") and time() >= paused_until:
