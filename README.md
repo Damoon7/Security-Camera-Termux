@@ -138,6 +138,36 @@ Press `Ctrl + C` in Termux, or tap **🛑 Stop** in your Telegram bot and confir
 
 ---
 
+## ⚡ Automatic Startup (Termux:Boot)
+
+To make the security camera run automatically whenever the phone boots up or restarts (ideal for unattended placement):
+
+1. Install **Termux:Boot** from F-Droid or GitHub Releases (ensure it matches your Termux installation source).
+2. Open the Termux:Boot app once from your Android app drawer to register its background receiver.
+3. In Termux, create the boot directory and startup script:
+   ```bash
+   mkdir -p ~/.termux/boot
+   nano ~/.termux/boot/start_cam.sh
+   ```
+4. Paste the following script inside, then save (`Ctrl + X`, `Y`, `Enter`):
+   ```bash
+   #!/data/data/com.termux/files/usr/bin/sh
+   termux-wake-lock
+   cd $HOME
+   if [ -f ~/.seccam_env ]; then
+       source ~/.seccam_env
+   fi
+   python3 SecCam.py > seccam_boot.log 2>&1 &
+   ```
+5. Make the script executable:
+   ```bash
+   chmod +x ~/.termux/boot/start_cam.sh
+   ```
+
+Now, whenever the phone powers on, Termux will automatically acquire a wake-lock, load your Telegram credentials, and start the surveillance script in the background.
+
+---
+
 ## ⚙️ Command-Line Options
 
 | Option | Description | Default |
