@@ -2,6 +2,10 @@
 """Security Camera for Termux (hardened & optimized version).
 
 Key Features:
+  - Two-way Telegram control: /pause [min], /resume, /snap, /status, /calibrate,
+    /sensitivity <N>, /schedule <HH:MM-HH:MM|off>, /stop, /help.
+  - Active hours schedule (--schedule HH:MM-HH:MM, e.g. 20:00-08:00) with automatic
+    recalibration when entering the active window.
   - Video default is 0 (skips ffmpeg to save battery/CPU); sends keyframes as one Telegram album.
   - Optimized MP4 encoding (-v 1): caps resolution at 1280p with H.264 veryfast/CRF 25 and
     +faststart for low file size, minimal CPU heat, and instant Telegram streaming.
@@ -48,6 +52,7 @@ log = logging.getLogger("seccam")
 EVENTS_DIR = "events"
 TMP_PHOTO = "photo_tmp.jpeg"
 TRIGGER_PHOTO = "photo_trigger.jpeg"
+SNAP_PHOTO = "photo_snap.jpeg"
 PHOTO_TIMEOUT = 40          # seconds for a single termux-camera-photo call
 MAX_PHOTOS_PER_EVENT = 300
 MAX_TG_SAMPLES_NO_VIDEO = 6
@@ -59,6 +64,19 @@ REQUIRED_TERMUX_BINARIES = (
     "termux-microphone-record",
     "termux-wake-lock",
     "termux-wake-unlock",
+)
+
+HELP_TEXT = (
+    "🤖 Available Commands:\n"
+    "/status - Show camera status & battery\n"
+    "/snap - Take & send an instant photo\n"
+    "/pause [min] - Pause monitoring (e.g. /pause 20 or /pause)\n"
+    "/resume - Resume monitoring immediately\n"
+    "/calibrate - Recalibrate motion sensor now\n"
+    "/sensitivity <1-500> - Set sensitivity % (e.g. /sensitivity 80)\n"
+    "/schedule <HH:MM-HH:MM|off> - Set active hours (e.g. /schedule 20:00-08:00)\n"
+    "/stop - Safely stop the security camera\n"
+    "/help - Show this help message"
 )
 
 
@@ -112,6 +130,40 @@ def require_curl():
         raise RuntimeError("Telegram needs curl but it is not installed. Run: pkg install curl -y")
 
 
+def parse_schedule(spec):
+    """Parse 'HH:MM-HH:MM' into (start_minutes, end_minutes) from midnight, or None."""
+    if not spec or spec.strip().lower() in ("off", "none", "all", "24/7"):
+        return None
+    m = re.fullmatch(r"\s*(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})\s*", spec)
+    if not m:
+        raise ValueError("Schedule must be HH:MM-HH:MM in 24h format (e.g. 20:00-08:00)")
+    h1, m1, h2, m2 = (int(x) for x in m.groups())
+    if not (0 <= h1 <= 23 and 0 <= m1 <= 59 and 0 <= h2 <= 23 and 0 <= m2 <= 59):
+        raise ValueError("Invalid hour or minute in schedule (hours 0-23, minutes 0-59)")
+    return h1 * 60 + m1, h2 * 60 + m2
+
+
+def format_schedule(sched):
+    if sched is None:
+        return "24/7 (always active)"
+    s, e = sched
+    return f"{s // 60:02d}:{s % 60:02d}-{e // 60:02d}:{e % 60:02d}"
+
+
+def is_within_schedule(sched, now_dt=None):
+    if sched is None:
+        return True
+    s, e = sched
+    if s == e:
+        return True
+    if now_dt is None:
+        now_dt = datetime.now()
+    cur = now_dt.hour * 60 + now_dt.minute
+    if s < e:
+        return s <= cur < e
+    return cur >= s or cur < e
+
+
 def check_runtime_environment(args):
     """Verify the required Termux utilities exist before the surveillance loop starts."""
     needed = list(REQUIRED_TERMUX_BINARIES)
@@ -155,6 +207,10 @@ def validate_args(args):
         sys.exit("Error: --interval cannot be negative")
     if args.heartbeat_hours < 0:
         sys.exit("Error: --heartbeat-hours cannot be negative")
+    try:
+        args.schedule_parsed = parse_schedule(args.schedule)
+    except ValueError as exc:
+        sys.exit(f"Error: {exc}")
 
 
 # --------------------------------------------------------------------------- #
@@ -178,8 +234,6 @@ def get_normalized_diff(image1, image2):
 
 def dif_of_images(image1, image2, noise_cutoff=10.0):
     diff = get_normalized_diff(image1, image2)
-    # Soft thresholding: sum only the excess above noise_cutoff so tiny thermal/ISO
-    # noise increases never cause a discontinuous cliff-edge jump.
     excess = np.maximum(0.0, diff - noise_cutoff)
     return int(np.sum(excess))
 
@@ -198,8 +252,6 @@ def process_image_file(filepath):
 
 
 def take_processed_photo(camera_id, filename=TMP_PHOTO, keep_file=False):
-    # Always delete any previous file first: if the camera call fails or times out,
-    # we must get None back instead of silently re-reading a stale photo.
     remove_if_exists(filename)
     run_cmd(["termux-camera-photo", "-c", camera_id, filename], timeout=PHOTO_TIMEOUT)
     processed = process_image_file(filename)
@@ -224,7 +276,6 @@ def prepare_tg_photo(filepath, max_dim=1920, quality=82):
         resample = getattr(Image, "Resampling", Image).LANCZOS
         with Image.open(filepath) as img:
             if img.format == "JPEG":
-                # Decode at reduced scale (much faster/lighter on phones); must precede load()
                 img.draft("RGB", (max_dim, max_dim))
             img = ImageOps.exif_transpose(img)
             img.thumbnail((max_dim, max_dim), resample)
@@ -242,7 +293,6 @@ def prepare_tg_photo(filepath, max_dim=1920, quality=82):
 def compute_threshold(img_array, sensitivity=100):
     """Learn (threshold, noise_cutoff) from a window of still frames (>= 3)."""
     pairs = [(x, y) for x in range(len(img_array)) for y in range(x + 1, len(img_array))]
-    # Subsample pixels per pair so peak memory stays low on phones
     flat = np.concatenate([get_normalized_diff(img_array[x], img_array[y]).ravel()[::2]
                            for x, y in pairs])
     noise_998 = float(np.percentile(flat, 99.8))
@@ -336,14 +386,12 @@ class ThresholdAdapter:
         self.reset_base(delta, cutoff)
 
     def reset_base(self, delta, cutoff):
-        """Called after a full (re)calibration: new reference values, empty window."""
         self.base_delta = float(delta)
         self.base_cutoff = float(cutoff)
         self.frames = []
         self.last_adapt = time()
 
     def clear(self):
-        """Called after an event: frames around an event must never be learned."""
         self.frames = []
 
     def observe(self, img, dif, delta):
@@ -354,7 +402,7 @@ class ThresholdAdapter:
             if len(self.frames) > self.WINDOW:
                 self.frames.pop(0)
         else:
-            self.frames = []  # window must be a contiguous calm run
+            self.frames = []
 
     def maybe_adapt(self, delta, cutoff):
         if (not self.enabled or len(self.frames) < self.WINDOW
@@ -387,7 +435,8 @@ class ThresholdAdapter:
 # --------------------------------------------------------------------------- #
 # Telegram
 # --------------------------------------------------------------------------- #
-def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
+def tg_request_raw(token, method, fields=None, files=None, retries=3, timeout=90):
+    """Call Telegram Bot API and return parsed JSON dict or None."""
     for attempt in range(1, retries + 1):
         cmd = ["curl", "-s", "--connect-timeout", "15", "--max-time", str(timeout), "-K", "-"]
         for k, v in (fields or {}).items():
@@ -402,17 +451,36 @@ def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
             except ValueError:
                 data = {}
             if data.get("ok"):
-                return True
+                return data
             code = data.get("error_code")
             if code == 429:
                 sleep(min(int(data.get("parameters", {}).get("retry_after", 5)), 60))
                 continue
-            if code in (400, 401, 403, 404):
+            if code in (400, 401, 403, 404, 409):
                 log.error("Telegram %s rejected (%s): %s", method, code, data.get("description"))
-                return False
+                return None
         sleep(2 * attempt)
     log.error("Telegram %s failed after %d attempts", method, retries)
-    return False
+    return None
+
+
+def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
+    return tg_request_raw(token, method, fields=fields, files=files, retries=retries, timeout=timeout) is not None
+
+
+def send_single_photo_to_telegram(cfg, filepath, caption):
+    token, chat = cfg["bottoken"], cfg["chatid"]
+    opt_photo = prepare_tg_photo(filepath)
+    try:
+        ok = tg_request(token, "sendPhoto", {"chat_id": chat, "caption": caption},
+                        {"photo": opt_photo}, timeout=TG_ALBUM_TIMEOUT)
+        if not ok:
+            tg_request(token, "sendMessage",
+                       {"chat_id": chat, "text": caption + " (photo upload failed)"})
+    finally:
+        if opt_photo.endswith(".tg.jpg"):
+            remove_if_exists(opt_photo)
+        remove_if_exists(filepath)
 
 
 def send_event_to_telegram(cfg, folder, video_path, photo_count):
@@ -444,7 +512,6 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count):
             ok = tg_request(token, "sendMessage", {"chat_id": chat, "text": caption})
 
         if not ok and upload_photos:
-            # Photos didn't make it: at least tell the owner something happened
             tg_request(token, "sendMessage",
                        {"chat_id": chat, "text": caption + " (photo upload failed, files kept on phone)"})
 
@@ -509,15 +576,23 @@ def worker_loop(q, args):
         if item is None:
             q.task_done()
             break
-        folder, audio_path, fr, photo_count = item
+        kind = item[0]
         try:
-            video_path = build_video(folder, audio_path, fr) if args.video == 1 else None
-            if tg_cfg:
-                send_event_to_telegram(tg_cfg, folder, video_path, photo_count)
+            if kind == "snap":
+                _, snap_path, caption = item
+                if tg_cfg:
+                    send_single_photo_to_telegram(tg_cfg, snap_path, caption)
+                else:
+                    remove_if_exists(snap_path)
+            else:
+                _, folder, audio_path, fr, photo_count = item
+                video_path = build_video(folder, audio_path, fr) if args.video == 1 else None
+                if tg_cfg:
+                    send_event_to_telegram(tg_cfg, folder, video_path, photo_count)
+                prune_events(args.max_events)
         except Exception:
-            log.exception("Background processing failed for %s", folder)
+            log.exception("Background processing failed")
         finally:
-            prune_events(args.max_events)
             q.task_done()
 
 
@@ -538,7 +613,6 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, 
     consecutive_calm = 0
     prev_img = first_img
 
-    # Preserve initial trigger and confirmation frames (_001.jpeg and _002.jpeg)
     for saved_tmp in (trigger_photo, second_photo):
         if saved_tmp and os.path.exists(saved_tmp):
             frame_path = os.path.join(folder, f"{stamp}_{photo_index + 1:03d}.jpeg")
@@ -558,7 +632,7 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, 
         run_cmd(["termux-camera-photo", "-c", camera_id, photo_path], timeout=PHOTO_TIMEOUT)
         cur_img = process_image_file(photo_path)
         if cur_img is None:
-            photo_index -= 1  # keep numbering and count honest
+            photo_index -= 1
             failures += 1
             if failures >= 5:
                 log.warning("\nCamera failing during event, ending recording early.")
@@ -581,7 +655,7 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, 
 
 
 # --------------------------------------------------------------------------- #
-# Status messages (Telegram)
+# Status messages & Remote Control (Telegram)
 # --------------------------------------------------------------------------- #
 class StatusNotifier:
     """Sends short status messages on their own thread, so the camera loop never waits for the
@@ -615,8 +689,11 @@ class StatusNotifier:
         if self._wanted(level, force):
             self._q.put(self._clean(text))
 
+    def reply(self, text):
+        """Always send direct replies to user commands regardless of --status-alerts mode."""
+        self.send(text, force=True)
+
     def send_limited(self, key, text, min_interval=1800, level="important"):
-        """Like send(), but at most once per min_interval seconds for the same key (anti-spam)."""
         now = time()
         if now - self._last_sent.get(key, -1e12) < min_interval:
             return
@@ -641,10 +718,65 @@ class StatusNotifier:
             self._thread.join(timeout)
 
     def send_now(self, text, level="important", force=False):
-        """Synchronous with a short timeout: used for the final 'stopped' message."""
         if self._wanted(level, force):
             tg_request(self.token, "sendMessage", {"chat_id": self.chat, "text": self._clean(text)},
                        retries=1, timeout=15)
+
+
+class TelegramController:
+    """Polls Telegram for incoming bot commands from the authorized chat_id and wakes the main loop."""
+
+    def __init__(self, args, notifier):
+        self.token = args.bottoken
+        self.chat = str(args.chatid) if args.chatid is not None else None
+        self.notifier = notifier
+        self.commands = queue.Queue()
+        self.wake_event = threading.Event()
+        self._stop = False
+        self._thread = None
+        if self.token and self.chat:
+            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
+            self._thread.start()
+
+    def stop(self):
+        self._stop = True
+        self.wake_event.set()
+
+    def wait(self, seconds):
+        self.wake_event.wait(timeout=max(0.0, seconds))
+        self.wake_event.clear()
+
+    def _flush_old_updates(self):
+        data = tg_request_raw(self.token, "getUpdates", {"offset": "-1", "timeout": "0"},
+                              retries=1, timeout=15)
+        if data and data.get("result"):
+            return data["result"][-1]["update_id"] + 1
+        return None
+
+    def _poll_loop(self):
+        offset = self._flush_old_updates()
+        while not self._stop:
+            fields = {"timeout": "20", "allowed_updates": json.dumps(["message"])}
+            if offset is not None:
+                fields["offset"] = str(offset)
+            data = tg_request_raw(self.token, "getUpdates", fields=fields, retries=1, timeout=30)
+            if not data or not isinstance(data.get("result"), list):
+                sleep(3)
+                continue
+            for upd in data["result"]:
+                offset = upd["update_id"] + 1
+                msg = upd.get("message") or {}
+                sender_chat = str((msg.get("chat") or {}).get("id", ""))
+                if sender_chat != self.chat:
+                    continue
+                text = (msg.get("text") or "").strip()
+                if not text.startswith("/"):
+                    continue
+                parts = text.split(maxsplit=1)
+                cmd = parts[0].split("@")[0].lower()
+                arg = parts[1].strip() if len(parts) > 1 else ""
+                self.commands.put((cmd, arg))
+                self.wake_event.set()
 
 
 def read_battery():
@@ -711,12 +843,29 @@ class PowerMonitor:
         return text
 
 
-def build_heartbeat(start_time, events, threshold, power):
+def describe_state(paused_until, schedule_parsed):
+    now = time()
+    if paused_until is not None:
+        if paused_until == float("inf"):
+            return "⏸️ Paused (until /resume)"
+        rem = max(1, int(round((paused_until - now) / 60.0)))
+        return f"⏸️ Paused ({rem}m remaining)"
+    if not is_within_schedule(schedule_parsed):
+        return f"🌙 Standby (outside schedule {format_schedule(schedule_parsed)})"
+    return "🟢 Active (monitoring)"
+
+
+def build_status_report(start_time, events, threshold, sensitivity, paused_until, schedule_parsed, power):
     uptime = int(time() - start_time)
     hours, rest = divmod(uptime, 3600)
-    return (f"💓 Still running (uptime {hours}h {rest // 60}m)\n"
-            f"Events since start: {events}\n"
-            f"Threshold: {int(threshold):,}\n" + power.describe())
+    thr_str = f"{int(threshold):,}" if threshold is not None else "uncalibrated"
+    return (
+        f"📊 Status: {describe_state(paused_until, schedule_parsed)}\n"
+        f"Uptime: {hours}h {rest // 60}m | Events: {events}\n"
+        f"Threshold: {thr_str} (sensitivity {sensitivity}%)\n"
+        f"Schedule: {format_schedule(schedule_parsed)}\n"
+        + power.describe()
+    )
 
 
 def telegram_selftest(args):
@@ -729,7 +878,7 @@ def telegram_selftest(args):
     else:
         ok = tg_request(args.bottoken, "sendMessage",
                         {"chat_id": args.chatid,
-                         "text": "🔧 Security camera is starting. Calibrating: please keep the scene still."},
+                         "text": "🔧 Security camera is starting. Send /help anytime for remote commands."},
                         retries=2, timeout=30)
         if ok:
             log.info("Telegram: enabled (test message sent)")
@@ -792,6 +941,7 @@ def parse_args():
     p.add_argument("-st", "--sensitivity", help="Detection sensitivity %% (default: 100)", type=int, default=100)
     p.add_argument("-ch", "--chatid", help="Telegram chat id (or env TG_CHAT_ID)", type=str)
     p.add_argument("-bt", "--bottoken", help="Telegram bot token (or env TG_BOT_TOKEN)", type=str)
+    p.add_argument("--schedule", help="Active hours in 24h HH:MM-HH:MM format (e.g. 20:00-08:00)", type=str)
     p.add_argument("--cooldown", help="Min seconds between SMS/call alerts (default: 300)", type=int, default=300)
     p.add_argument("--max-events", help="Keep only newest N event folders (0 = keep all, default: 20)",
                    type=int, default=20)
@@ -858,6 +1008,7 @@ def main():
 
     notifier = StatusNotifier(args)
     power = PowerMonitor(notifier)
+    remote = TelegramController(args, notifier)
     if args.heartbeat_hours > 0 and not notifier.available:
         log.warning("--heartbeat-hours ignored: Telegram is not enabled")
 
@@ -866,7 +1017,6 @@ def main():
     worker.start()
 
     run_cmd(["termux-wake-lock"], timeout=10)
-    log.info("Setting up the device (place phone in position)...\n")
 
     started = time()
     events_total = 0
@@ -874,23 +1024,40 @@ def main():
     last_alert = 0.0
     rapid_triggers = 0
     camera_alarm = False
+    paused_until = None
+    schedule_parsed = args.schedule_parsed
     heartbeat_interval = args.heartbeat_hours * 3600
     next_heartbeat = started + heartbeat_interval if heartbeat_interval > 0 else None
 
-    try:
-        try:
-            delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
-        except RuntimeError as exc:
-            log.error("Calibration failed: %s", exc)
-            stop_text = f"❌ Startup failed: {exc}"
-            raise SystemExit(1)
-        prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
-        sleep(1)
-        adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
+    delta = None
+    noise_cutoff = None
+    prev = None
+    adapter = None
+    was_active = False
+    standby_logged = False
 
+    try:
         power.poll(force=True)
-        notifier.send(f"✅ Monitoring started (camera {args.camera})\n"
-                      f"Threshold: {int(delta):,}\n" + power.describe())
+        if is_within_schedule(schedule_parsed):
+            log.info("Setting up the device (place phone in position)...\n")
+            try:
+                delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+            except RuntimeError as exc:
+                log.error("Calibration failed: %s", exc)
+                stop_text = f"❌ Startup failed: {exc}"
+                raise SystemExit(1)
+            prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+            sleep(1)
+            adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
+            was_active = True
+            notifier.send(f"✅ Monitoring started (camera {args.camera})\n"
+                          f"Threshold: {int(delta):,}\n"
+                          f"Schedule: {format_schedule(schedule_parsed)}\n" + power.describe())
+        else:
+            log.info("Outside active schedule (%s). Waiting in standby...", format_schedule(schedule_parsed))
+            notifier.send(f"🌙 Standby: waiting for schedule window ({format_schedule(schedule_parsed)}).\n"
+                          + power.describe())
+            standby_logged = True
 
         fails = 0
         while True:
@@ -898,9 +1065,157 @@ def main():
                 power.poll()
                 if next_heartbeat is not None and time() >= next_heartbeat:
                     next_heartbeat = time() + heartbeat_interval
-                    notifier.send(build_heartbeat(started, events_total, delta, power), force=True)
+                    notifier.send(
+                        build_status_report(started, events_total, delta, args.sensitivity,
+                                            paused_until, schedule_parsed, power),
+                        force=True
+                    )
 
-                # keep_file=True so the photo can be preserved as evidence if it triggers
+                # Process any incoming Telegram remote commands
+                recalibrate_requested = False
+                while not remote.commands.empty():
+                    cmd, arg = remote.commands.get_nowait()
+                    log.info("\n[Telegram Command] %s %s", cmd, arg)
+
+                    if cmd in ("/help", "/start"):
+                        notifier.reply(HELP_TEXT)
+
+                    elif cmd == "/status":
+                        power.poll(force=True)
+                        notifier.reply(build_status_report(
+                            started, events_total, delta, args.sensitivity,
+                            paused_until, schedule_parsed, power
+                        ))
+
+                    elif cmd == "/pause":
+                        if not arg:
+                            paused_until = float("inf")
+                            notifier.reply("⏸️ Monitoring paused indefinitely. Send /resume to continue.")
+                        else:
+                            try:
+                                mins = float(arg)
+                                if mins <= 0:
+                                    raise ValueError
+                                paused_until = time() + mins * 60.0
+                                notifier.reply(f"⏸️ Monitoring paused for {mins:g} minutes.")
+                            except ValueError:
+                                notifier.reply("⚠️ Usage: /pause [minutes] (e.g. /pause 20 or /pause)")
+
+                    elif cmd == "/resume":
+                        paused_until = None
+                        if is_within_schedule(schedule_parsed):
+                            notifier.reply("▶️ Resuming monitoring...")
+                        else:
+                            notifier.reply(
+                                f"▶️ Pause cleared, but currently outside schedule ({format_schedule(schedule_parsed)}). "
+                                "Send /schedule off to monitor now."
+                            )
+
+                    elif cmd in ("/snap", "/photo"):
+                        notifier.reply("📸 Taking snapshot...")
+                        remove_if_exists(SNAP_PHOTO)
+                        run_cmd(["termux-camera-photo", "-c", args.camera, SNAP_PHOTO], timeout=PHOTO_TIMEOUT)
+                        if os.path.exists(SNAP_PHOTO):
+                            stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                            jobs.put(("snap", SNAP_PHOTO, f"📸 Snapshot ({stamp})"))
+                        else:
+                            notifier.reply("❌ Snapshot failed (camera did not return a photo).")
+
+                    elif cmd in ("/calibrate", "/recalibrate"):
+                        recalibrate_requested = True
+
+                    elif cmd == "/sensitivity":
+                        try:
+                            new_sens = int(arg)
+                            if not (1 <= new_sens <= 500):
+                                raise ValueError
+                            old_sens = args.sensitivity
+                            args.sensitivity = new_sens
+                            if delta is not None:
+                                delta = max(1, int(delta * (old_sens / float(new_sens))))
+                                if adapter is not None:
+                                    adapter.sensitivity = new_sens
+                                    adapter.reset_base(delta, noise_cutoff)
+                            notifier.reply(
+                                f"🎯 Sensitivity set to {new_sens}% "
+                                + (f"(new threshold: {int(delta):,})" if delta else "")
+                            )
+                        except ValueError:
+                            notifier.reply("⚠️ Usage: /sensitivity <1-500> (e.g. /sensitivity 80)")
+
+                    elif cmd == "/schedule":
+                        if not arg:
+                            notifier.reply(f"🕒 Current schedule: {format_schedule(schedule_parsed)}\n"
+                                           "Usage: /schedule HH:MM-HH:MM or /schedule off")
+                        else:
+                            try:
+                                schedule_parsed = parse_schedule(arg)
+                                stand_msg = format_schedule(schedule_parsed)
+                                notifier.reply(f"🕒 Schedule updated: {stand_msg}")
+                                standby_logged = False
+                            except ValueError as exc:
+                                notifier.reply(f"⚠️ {exc}")
+
+                    elif cmd == "/stop":
+                        STOP_REASON["text"] = "stopped remotely via Telegram (/stop)"
+                        raise KeyboardInterrupt
+
+                    else:
+                        notifier.reply("❓ Unknown command. Send /help for available commands.")
+
+                # Check if a timed pause has expired
+                if paused_until is not None and paused_until != float("inf") and time() >= paused_until:
+                    paused_until = None
+                    log.info("\nPause timer expired; resuming.")
+                    notifier.send("▶️ Pause timer finished. Resuming monitoring.")
+
+                # Handle manual /calibrate request
+                if recalibrate_requested:
+                    notifier.reply("🔧 Recalibrating sensor, please keep the scene still...")
+                    remove_if_exists(TRIGGER_PHOTO)
+                    remove_if_exists(TMP_PHOTO)
+                    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+                    prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+                    adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
+                    rapid_triggers = 0
+                    was_active = True
+                    notifier.reply(f"✅ Calibration complete (Threshold: {int(delta):,}).")
+                    continue
+
+                # Check whether we should be actively monitoring right now
+                in_sched = is_within_schedule(schedule_parsed)
+                is_active = (paused_until is None) and in_sched
+
+                if not is_active:
+                    if was_active:
+                        was_active = False
+                        remove_if_exists(TRIGGER_PHOTO)
+                        remove_if_exists(TMP_PHOTO)
+                        prev = None
+                        if not in_sched and not standby_logged:
+                            log.info("\nEntering scheduled standby (%s)...", format_schedule(schedule_parsed))
+                            notifier.send(f"🌙 Entering standby (schedule {format_schedule(schedule_parsed)}).")
+                            standby_logged = True
+                    cl = datetime.now().strftime("%H:%M:%S")
+                    state_txt = "PAUSED" if paused_until is not None else f"STANDBY ({format_schedule(schedule_parsed)})"
+                    print(f"{cl} | {state_txt}                          ", end="\r")
+                    remote.wait(15)
+                    continue
+
+                # Transitioning from Standby/Paused -> Active
+                if not was_active:
+                    standby_logged = False
+                    log.info("\nActivating surveillance; calibrating sensor...")
+                    notifier.send("🌅 Active window started. Calibrating sensor...")
+                    delta, noise_cutoff, last_img = setup_num(args.camera, args.sensitivity)
+                    prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
+                    adapter = ThresholdAdapter(args.sensitivity, args.adapt_minutes, delta, noise_cutoff)
+                    rapid_triggers = 0
+                    was_active = True
+                    notifier.send(f"✅ Monitoring active (Threshold: {int(delta):,}).")
+                    continue
+
+                # Active monitoring: capture & compare
                 img = take_processed_photo(args.camera, keep_file=True)
                 if img is None:
                     fails += 1
@@ -908,7 +1223,7 @@ def main():
                         log.warning("Camera failed %d times in a row", fails)
                         notifier.send_limited("camera_fail", f"📷 Camera failed {fails} times in a row", 1800)
                         camera_alarm = True
-                    sleep(min(30, fails))
+                    remote.wait(min(30, fails))
                     continue
                 if camera_alarm:
                     notifier.send("✅ Camera is working again")
@@ -924,7 +1239,6 @@ def main():
 
                 if dif > delta:
                     # Save candidate trigger frame and take 1 immediate confirmation shot
-                    # to filter out single-frame autofocus/AE/OIS camera glitches.
                     remove_if_exists(TRIGGER_PHOTO)
                     if os.path.exists(TMP_PHOTO):
                         try:
@@ -938,7 +1252,6 @@ def main():
                         prev = img
                         continue
 
-                    # Compare confirmation frame against pre-trigger baseline (`prev`)
                     verify_dif = dif_of_images(prev, verify_img, noise_cutoff)
                     if verify_dif <= delta:
                         log.info("\nIgnored single-frame camera glitch (Diff: %s, Verify: %s)",
@@ -951,8 +1264,6 @@ def main():
 
                     prev = verify_img
                     rapid_triggers += 1
-                    # 3 confirmed triggers back-to-back with no calm frame in between:
-                    # persistent noise or lighting shift, so re-learn the baseline.
                     if rapid_triggers >= 3:
                         log.warning("\n⚠️ Persistent high difference detected (noise or lighting shift).")
                         log.info("Auto-recalibrating sensor baseline...")
@@ -969,7 +1280,7 @@ def main():
                             notifier.send("❌ Recalibration failed. Keeping previous settings, "
                                           "retrying in 60s.")
                             prev = None
-                            sleep(60)
+                            remote.wait(60)
                             continue
                         prev = last_img if last_img is not None else take_processed_photo(args.camera, keep_file=False)
                         adapter.reset_base(delta, noise_cutoff)
@@ -1003,7 +1314,7 @@ def main():
                         args.camera, verify_img, noise_cutoff, delta,
                         trigger_photo=TRIGGER_PHOTO, second_photo=TMP_PHOTO
                     )
-                    jobs.put((folder, audio_path, fr, count))
+                    jobs.put(("event", folder, audio_path, fr, count))
                     log.info("[Info] Processing & uploading in background. Resuming surveillance...")
                     if last is not None:
                         prev = last
@@ -1019,8 +1330,10 @@ def main():
                     delta, noise_cutoff = new_delta, new_cutoff
 
                 if args.interval > 0:
-                    sleep(args.interval)
+                    remote.wait(args.interval)
 
+            except KeyboardInterrupt:
+                raise
             except Exception as exc:
                 log.exception("Unexpected error in surveillance loop; continuing in 5s")
                 notifier.send_limited("loop_error", f"⚠️ Unexpected error: {type(exc).__name__}: {exc}", 1800)
@@ -1028,19 +1341,21 @@ def main():
                 remove_if_exists(TRIGGER_PHOTO)
                 remove_if_exists(TMP_PHOTO)
                 prev = None
-                sleep(5)
+                remote.wait(5)
 
     except KeyboardInterrupt:
         stop_text = f"🛑 Security camera stopped: {STOP_REASON['text']}"
         log.info("\n\n[Info] Security camera stopped (%s).", STOP_REASON["text"])
     finally:
+        remote.stop()
         run_cmd(["termux-wake-unlock"], timeout=10)
         run_cmd(["termux-microphone-record", "-q"], timeout=15)
         remove_if_exists(TRIGGER_PHOTO)
         remove_if_exists(TMP_PHOTO)
+        remove_if_exists(SNAP_PHOTO)
         if stop_text:
             notifier.flush(timeout=15)
-            notifier.send_now(stop_text)
+            notifier.send_now(stop_text, force=True)
         if not jobs.empty() or worker.is_alive():
             log.info("Finishing pending uploads (Ctrl+C again to skip)...")
             try:
