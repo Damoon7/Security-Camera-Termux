@@ -2,16 +2,18 @@
 
 Turn a spare or old Android phone into a motion-detecting security camera using **Termux** and **Python**.
 
-The script continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications via SMS, phone call, and Telegram.
+The script continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications via SMS, phone call, and Telegram—while letting you control the camera remotely through Telegram commands.
 
 ---
 
 ## ✨ Key Features
 
 * **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames (see *Automatic Calibration* below).
+* **Two-Way Telegram Remote Control:** Send commands to your bot from anywhere to pause or resume monitoring (`/pause 20`, `/resume`), take an instant photo (`/snap`), check battery and uptime (`/status`), adjust sensitivity (`/sensitivity`), change active hours (`/schedule`), recalibrate (`/calibrate`), or stop the script (`/stop`).
+* **Active Hours Scheduling:** Optionally restrict surveillance to specific hours (for example `--schedule 20:00-08:00`). Outside the active window the camera waits in low-power standby and automatically calibrates when the active window begins.
 * **Dynamic Event Recording:** Confirming motion across two consecutive frames filters out single-frame autofocus/auto-exposure glitches on older phones, then keeps recording while motion persists and stops once the scene calms down. Both the initial trigger photo and confirmation frame are kept as the first evidence frames.
 * **Optimized Telegram Alerts:** Sends a downscaled keyframe album (and optional 1280p streaming-ready MP4 video) that uploads quickly even on slow mobile networks. If the photo upload fails, a plain text alert is sent instead.
-* **Remote Status Updates:** Telegram messages tell you when the camera is ready, recalibrating, having camera trouble, low on battery, or stopped, plus an optional "still alive" heartbeat, so you always know what it is doing while you're away.
+* **Remote Status Updates:** Telegram messages tell you when the camera is ready, recalibrating, entering standby, having camera trouble, low on battery, or stopped, plus an optional "still alive" heartbeat.
 * **Call & SMS Notifications:** Sends an SMS and/or places a phone call, with a configurable cooldown to prevent notification spam.
 * **Designed for Long-Running Use:** Sequential background task queue, automatic storage pruning, timeouts on all Termux commands, a rotating log file, and an optional frame interval to reduce CPU and battery usage.
 
@@ -71,7 +73,7 @@ curl -O [https://raw.githubusercontent.com/Damoon7/Security-Camera-Termux/main/S
 
 ### 1. Telegram Credentials (optional)
 
-Telegram alerts need a bot token and your numeric chat ID:
+Telegram alerts and remote control need a bot token and your numeric chat ID:
 
 * Create a bot with [@BotFather](https://t.me/BotFather) to get the token, then press **Start** in your new bot's chat.
 * Message [@userinfobot](https://t.me/userinfobot) to get your numeric Chat ID.
@@ -102,6 +104,11 @@ chmod 600 ~/.seccam_env
 source ~/.seccam_env
 ```
 
+> 💡 **Tip:** To load these credentials automatically in every new Termux session, append `source ~/.seccam_env` to `~/.bashrc`:
+> ```bash
+> echo 'source ~/.seccam_env' >> ~/.bashrc
+> ```
+
 The `-ch` / `-bt` command-line options also work, but they take priority over the environment variables and are visible in your shell history.
 
 **What if the credentials aren't loaded?** The script never silently skips Telegram. If it finds no credentials at startup, it asks:
@@ -117,7 +124,7 @@ When credentials are present, the script sends a short "starting" message at sta
 
 ### 2. Run Surveillance
 
-Default settings (back camera, 100% sensitivity, video disabled):
+Default settings (back camera, 100% sensitivity, 24/7 active, video disabled):
 
 ```bash
 python3 SecCam.py
@@ -127,7 +134,7 @@ Place the phone in position and step out of view. The script waits for the scene
 
 ### Stopping the Script
 
-Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary files, and finishes pending uploads (up to 2 minutes).
+Press `Ctrl + C` in Termux, or send `/stop` to your Telegram bot. Either method releases the wake lock and microphone, removes temporary files, and finishes pending uploads (up to 2 minutes).
 
 ---
 
@@ -142,6 +149,7 @@ Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary 
 | `-st`, `--sensitivity` | Detection sensitivity in percent (higher = more sensitive) | `100` |
 | `-ch`, `--chatid` | Numeric Telegram Chat ID (overrides `TG_CHAT_ID`) | `None` |
 | `-bt`, `--bottoken` | Telegram Bot Token (overrides `TG_BOT_TOKEN`) | `None` |
+| `--schedule` | Active hours in 24h `HH:MM-HH:MM` format (e.g. `20:00-08:00`) | `None` (24/7) |
 | `--cooldown` | Minimum seconds between SMS/call alerts (does **not** limit Telegram) | `300` |
 | `--max-events` | Number of newest event folders to keep (`0` keeps all) | `20` |
 | `--interval` | Extra sleep in seconds between frames to reduce CPU and battery use | `0.0` |
@@ -152,6 +160,39 @@ Press `Ctrl + C`. This releases the wake lock and microphone, removes temporary 
 | `--no-telegram` | Run without Telegram and skip the startup question about credentials | off |
 
 Both a chat ID and a bot token are required to enable Telegram. If only one is provided, the script exits with an error.
+
+---
+
+## 🎮 Remote Control via Telegram
+
+When Telegram is enabled, a background polling thread listens for commands sent to your bot.
+
+* **Authorized chat only:** Commands are accepted **only** from your configured `TG_CHAT_ID`; messages from any other user or chat are ignored.
+* **Stale commands are skipped:** On startup, any old unread messages sent while the script was offline are flushed so a previous `/stop` or `/pause` never triggers accidentally.
+* **Hardware-safe execution:** Camera actions (`/snap`, `/calibrate`) are handed off to the main surveillance loop so two camera processes never collide.
+
+| Command | Description |
+| :--- | :--- |
+| `/status` | Show current state (`Active`, `Paused`, or `Standby`), uptime, total events, current threshold, active schedule, battery %, charger status, and temperature |
+| `/snap` (or `/photo`) | Take an instant photo right now and upload it to Telegram (works even while paused or in scheduled standby) |
+| `/pause` | Pause motion detection indefinitely until you send `/resume` |
+| `/pause <minutes>` | Pause motion detection for `<minutes>` (e.g. `/pause 20`), then resume automatically |
+| `/resume` | Resume motion detection immediately |
+| `/calibrate` | Re-run full sensor calibration right now |
+| `/sensitivity <1-500>` | Change detection sensitivity percentage on the fly (e.g. `/sensitivity 80`) |
+| `/schedule <HH:MM-HH:MM\|off>` | View or update active monitoring hours (e.g. `/schedule 20:00-08:00` or `/schedule off` for 24/7) |
+| `/stop` | Safely stop the script, release the wake lock and microphone, and exit |
+| `/help` | Show the list of available commands |
+
+---
+
+## 🕒 Active Hours Schedule
+
+If you only want surveillance during specific hours (such as overnight or while you are at work), pass `--schedule HH:MM-HH:MM` in 24-hour format or set it anytime via `/schedule` in Telegram:
+
+* Supports both **overnight ranges** that cross midnight (e.g. `20:00-08:00`) and **same-day ranges** (e.g. `08:30-17:30`).
+* **Outside active hours (Standby):** The camera stops taking photos to save battery and keep the phone cool, while Telegram remote commands (`/status`, `/snap`, `/schedule`, `/stop`) remain responsive.
+* **Entering active hours:** When the scheduled window starts, the script wakes up, runs a fresh sensor calibration for the current lighting conditions, and begins monitoring automatically.
 
 ---
 
@@ -168,24 +209,26 @@ Each adaptation takes a few seconds of processing on the phone, which delays one
 
 ## 📡 Telegram Status Messages
 
-When Telegram is enabled, the camera also reports what it is doing, so silence doesn't leave you guessing. Status messages are sent on their own thread, so they never slow down the camera or wait behind photo uploads.
+When Telegram is enabled, the camera also reports what it is doing, so silence doesn't leave you guessing. Status messages are sent on their own thread, so they never slow down the camera or wait behind photo uploads. Direct replies to your remote commands (`/status`, `/pause`, etc.) are always sent regardless of `--status-alerts`.
 
 **`--status-alerts important` (default)**
 
 | Message | When |
 | :--- | :--- |
 | 🔧 Starting | The script started and is calibrating (step out of view) |
-| ✅ Monitoring started | Calibration finished; shows the threshold and battery |
+| ✅ Monitoring started / active | Calibration finished; shows the threshold, schedule, and battery |
+| 🌙 Standby / 🌅 Active window started | Entering or leaving the `--schedule` window |
+| ▶️ Pause timer finished | A timed `/pause <minutes>` expired and monitoring resumed |
 | ⚠️ Recalibrating / ✅ Recalibration done / ❌ failed | Emergency recalibration (monitoring is paused meanwhile) |
 | 📷 Camera failed N times / ✅ Camera is working again | The camera stopped returning photos (reported at most every 30 min) |
 | 🔋 Battery low | Battery at 20% and again at 10% while not charging |
 | 🔌 Charger disconnected / connected | Power source changed (checked every 5 minutes) |
 | ⚠️ Unexpected error | An internal error was caught; the script keeps running (at most every 30 min) |
-| 🛑 Stopped | Ctrl+C, or the system/terminal ended the script (shutdown, closed session) |
+| 🛑 Stopped | `Ctrl+C`, `/stop`, or the system/terminal ended the script |
 
-**`--status-alerts all`** adds a "🚨 Motion detected, recording..." ping the moment an event starts (the photo album only arrives after the event ends) and every gradual threshold update. **`--status-alerts off`** sends no status messages. Motion alerts with photos are always sent.
+**`--status-alerts all`** adds a "🚨 Motion detected, recording..." ping the moment an event starts (the photo album only arrives after the event ends) and every gradual threshold update. **`--status-alerts off`** sends no automatic status messages (command replies and motion alerts with photos are still sent).
 
-**Heartbeat (`--heartbeat-hours N`)** sends a short summary every N hours: uptime, events since start, threshold, battery and temperature. It is sent even when `--status-alerts off`, because it is its own option.
+**Heartbeat (`--heartbeat-hours N`)** sends a periodic status report every N hours: current state, uptime, events since start, threshold, schedule, battery, and temperature. It is sent even when `--status-alerts off`, because it is its own option.
 
 > ⚠️ **A dead phone can't announce it.** If the battery dies, the power is cut, or Android force-kills the process, no code can send a message. The "Stopped" message is best-effort (it works when the system asks the script to end politely). The reliable signal is a **missing heartbeat**: if you expect one every 6 hours (`--heartbeat-hours 6`) and it doesn't arrive, something is wrong.
 
@@ -204,10 +247,17 @@ Every event is saved in its own folder: `events/<YYYY-MM-DD_HHMMSS>/`. It contai
 ## 📌 Examples
 
 ### Reduced Power Usage
-Waits 1.5 seconds between frames to reduce CPU and battery usage, and keeps only the 10 newest events. Telegram alerts are sent if the environment variables are loaded:
+Waits 1.5 seconds between frames to reduce CPU and battery usage, and keeps only the 10 newest events. Telegram alerts and remote commands are active if the environment variables are loaded:
 
 ```bash
 python3 SecCam.py --interval 1.5 --max-events 10
+```
+
+### Night-Only Surveillance (8 PM to 8 AM)
+Monitors automatically from 20:00 to 08:00 every night, stays in standby during the day, and sends a heartbeat every 6 hours:
+
+```bash
+python3 SecCam.py --schedule 20:00-08:00 --heartbeat-hours 6
 ```
 
 ### Video Recording & Calling
@@ -240,7 +290,7 @@ While running, an unexpected error is logged to `seccam.log` and the script carr
 * Detection compares each frame with the previous one. A perfectly still object (for example, someone who stops moving in view) will not keep triggering, and very slow changes are absorbed as normal.
 * If the scene produces constant noise (wind, flickering light, trees), the script recalibrates itself automatically. Monitoring is briefly paused while this takes place.
 * Gradual adaptation learns from calm frames only, and may slowly raise the threshold as the camera sensor warms up or ambient light drops. Check `seccam.log` for `Threshold adapted` lines during the first nights.
-* Status messages need a working internet connection. During an outage they are retried briefly and then dropped.
+* Status messages and remote commands need a working internet connection. During an outage status messages are retried briefly and then dropped, and remote commands are processed once connectivity returns.
 * Photo capture speed depends on the phone; expect several seconds per frame, so very fast movements can be missed.
 * Detection quality depends on camera placement, lighting, and phone model. Test it before relying on it.
 
