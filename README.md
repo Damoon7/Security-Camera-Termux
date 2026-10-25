@@ -2,17 +2,17 @@
 
 Turn a spare or old Android phone into a motion-detecting security camera using **Termux** and **Python**.
 
-The script is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `telegram_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications via SMS, phone call, and Telegram—while letting you control the camera remotely through an interactive Telegram button panel.
+The project is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `telegram_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications via SMS, phone call, and Telegram—while letting you control the camera remotely through an interactive Telegram button panel.
 
 ---
 
 ## ✨ Key Features
 
-* **Modular Architecture:** Cleanly separated into independent modules for configuration, vision processing, power monitoring, Telegram management, and main execution.
+* **Modular Architecture:** Cleanly separated into independent modules for configuration (`config.py`), vision processing (`vision.py`), power monitoring (`power.py`), Telegram management (`telegram_mgr.py`), and main execution (`SecCam.py`).
 * **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames (see *Automatic Calibration* below).
 * **Interactive Telegram Control Panel:** Automatically registers the official Telegram `/` command menu, displays a persistent bottom button pad (`📸 Snap`, `📊 Status`, `⏸️ Pause`, `▶️ Resume`, `🎯 Sensitivity`, `🕒 Schedule`, `🔧 Calibrate`, `🛑 Stop`), and provides inline buttons for pause durations, sensitivity presets, schedules, and stop confirmation.
 * **Active Hours Scheduling:** Optionally restrict surveillance to specific hours (for example `--schedule 20:00-08:00`). Outside the active window the camera waits in low-power standby and automatically calibrates when the active window begins.
-* **Dynamic Event Recording:** Confirming motion across two consecutive frames filters out single-frame autofocus/auto-exposure glitches on older phones, then keeps recording while motion persists and stops once the scene calms down. Both the initial trigger photo and confirmation frame are kept as the first evidence frames.
+* **Dynamic Event Recording & Glitch Filter:** Confirming motion across two consecutive frames filters out single-frame autofocus/auto-exposure glitches on older phones, then keeps recording while motion persists and stops once the scene calms down. Both the initial trigger photo and confirmation frame are kept as the first evidence frames.
 * **Optimized Telegram Alerts:** Sends a downscaled keyframe album (and optional 1280p streaming-ready MP4 video) that uploads quickly even on slow mobile networks. If the photo upload fails, a plain text alert is sent instead.
 * **Remote Status Updates:** Telegram messages tell you when the camera is ready, recalibrating, entering standby, having camera trouble, low on battery, or stopped, plus an optional "still alive" heartbeat.
 * **Call & SMS Notifications:** Sends an SMS and/or places a phone call, with a configurable cooldown to prevent notification spam.
@@ -62,7 +62,7 @@ pkg install ffmpeg -y
 > env INCLUDE="$PREFIX/include" LDFLAGS="-lm" pip install Pillow
 > ```
 
-Clone the repository to get all modular files (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `telegram_mgr.py`):
+Clone the repository to download all project modules (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `telegram_mgr.py`):
 
 ```bash
 git clone https://github.com/Damoon7/Security-Camera-Termux.git
@@ -106,7 +106,7 @@ chmod 600 ~/.seccam_env
 . ~/.seccam_env
 ```
 
-> 💡 **Tip:** To load these credentials automatically in every new Termux session, append `. ~/.seccam_env` to `~/.bashrc`:
+> 💡 **Tip:** To load these credentials automatically in every new Termux session, append `. ~/.seccam_env` to `~/.bashrc` (note that any process running in your Termux user environment will then inherit these variables):
 > ```bash
 > echo '. ~/.seccam_env' >> ~/.bashrc
 > ```
@@ -145,20 +145,21 @@ Press `Ctrl + C` in Termux, or tap **🛑 Stop** in your Telegram bot and confir
 To make the security camera run automatically whenever the phone boots up or restarts (ideal for unattended placement):
 
 1. Install **Termux:Boot** from F-Droid or GitHub Releases (ensure it matches your Termux installation source).
+   > 💡 If Google Play Protect shows an *"Unsafe app blocked"* prompt because Termux:Boot targets an older Android SDK, tap **More details → Install anyway**.
 2. Open the Termux:Boot app once from your Android app drawer to register its background receiver.
 3. In Termux, create the boot directory and startup script:
    ```bash
    mkdir -p ~/.termux/boot
    nano ~/.termux/boot/start_cam.sh
    ```
-4. Paste the following script inside (using `.` instead of `source` for dash shell compatibility, plus a 30s network wait):
+4. Paste the following script inside, then save (`Ctrl + X`, `Y`, `Enter`):
    ```bash
    #!/data/data/com.termux/files/usr/bin/sh
-   sleep 30
    termux-wake-lock
-   cd $HOME/Security-Camera-Termux
-   if [ -f ~/.seccam_env ]; then
-       . ~/.seccam_env
+   sleep 30
+   cd "$HOME/Security-Camera-Termux" || exit 1
+   if [ -f "$HOME/.seccam_env" ]; then
+       . "$HOME/.seccam_env"
    fi
    python3 SecCam.py > seccam_boot.log 2>&1 &
    ```
@@ -167,7 +168,7 @@ To make the security camera run automatically whenever the phone boots up or res
    chmod +x ~/.termux/boot/start_cam.sh
    ```
 
-Now, whenever the phone powers on, Termux will automatically wait for networking, acquire a wake-lock, navigate to the project directory, load your Telegram credentials, and start the surveillance script in the background.
+Now, whenever the phone powers on, Termux will acquire a wake-lock, wait 30 seconds for Wi-Fi/mobile data to connect, load your Telegram credentials, and start the surveillance script in the background.
 
 ---
 
@@ -179,7 +180,7 @@ Now, whenever the phone powers on, Termux will automatically wait for networking
 | `-v`, `-V`, `--video` | `1` to encode photos and audio into an MP4 (requires ffmpeg), `0` to skip | `0` |
 | `-sms`, `--sms` | Phone number for SMS alerts | `None` |
 | `-c`, `--call` | Phone number for alert calls | `None` |
-| `-st`, `--sensitivity` | Detection sensitivity in percent (higher = more sensitive) | `100` |
+| `-st`, `--sensitivity` | Detection sensitivity in percent, `1`–`500` (higher = more sensitive) | `100` |
 | `-ch`, `--chatid` | Numeric Telegram Chat ID (overrides `TG_CHAT_ID`) | `None` |
 | `-bt`, `--bottoken` | Telegram Bot Token (overrides `TG_BOT_TOKEN`) | `None` |
 | `--schedule` | Active hours in 24h `HH:MM-HH:MM` format (e.g. `20:00-08:00`) | `None` (24/7) |
@@ -202,16 +203,16 @@ When Telegram is enabled, a background polling thread listens for button taps an
 
 * **Persistent Control Pad & `/` Menu:** At startup, the script automatically registers the official Telegram `/` command menu and displays a persistent 8-button control pad at the bottom of your chat.
 * **Interactive Inline Sub-Menus:** Tapping **⏸️ Pause**, **🎯 Sensitivity**, **🕒 Schedule**, or **🛑 Stop** opens inline buttons right under the message so you can pick a preset with one tap (or type a custom value).
-* **Authorized chat only:** Commands and button taps are accepted **only** from your configured `TG_CHAT_ID`; messages from any other user or chat are ignored.
+* **Authorized chat only:** Commands and button taps are accepted **only** from your configured `TG_CHAT_ID` (use a private 1-on-1 chat with your bot).
 * **Stale commands are skipped:** On startup, any old unread messages sent while the script was offline are flushed so a previous `/stop` or `/pause` never triggers accidentally.
-* **Hardware-safe execution:** Camera actions (`/snap`, `/calibrate`) are handed off to the main surveillance loop so two camera processes never collide.
+* **Hardware-safe execution:** Camera actions (`/snap`, `/calibrate`) are handed off to the main surveillance loop so two camera processes never collide, and snapshots upload on their own thread without waiting behind video encoding.
 
 | Button / Command | Description |
 | :--- | :--- |
 | **📊 Status** (`/status`) | Show current state (`Active`, `Paused`, or `Standby`), uptime, total events, current threshold, active schedule, battery %, charger status, and temperature |
 | **📸 Snap** (`/snap` or `/photo`) | Take an instant photo right now and upload it to Telegram (works even while paused or in scheduled standby) |
-| **⏸️ Pause** (`/pause [minutes]`) | Opens inline buttons (`15m`, `30m`, `1h`, `2h`, `♾️ Indefinitely`), or type `/pause 20` for a custom duration |
-| **▶️ Resume** (`/resume`) | Resume motion detection immediately |
+| **⏸️ Pause** (`/pause [minutes]`) | Tapping the **⏸️ Pause** button opens duration presets (`15m`, `30m`, `1h`, `2h`, `♾️ Indefinitely`). Typing `/pause 20` pauses for 20 minutes; typing `/pause` with no number pauses indefinitely |
+| **▶️ Resume** (`/resume`) | Resume motion detection immediately without needing a full recalibration |
 | **🎯 Sensitivity** (`/sensitivity [1-500]`) | Opens inline presets (`50%`, `75%`, `100%`, `125%`, `150%`), or type e.g. `/sensitivity 80` |
 | **🕒 Schedule** (`/schedule [HH:MM-HH:MM\|off]`) | Opens inline schedule presets (`20:00-08:00`, `22:00-07:00`, `08:00-17:00`, `24/7`), or type a custom range |
 | **🔧 Calibrate** (`/calibrate`) | Re-run full sensor calibration right now |
@@ -324,7 +325,7 @@ While running, an unexpected error is logged to `seccam.log` and the script carr
 * Detection compares each frame with the previous one. A perfectly still object (for example, someone who stops moving in view) will not keep triggering, and very slow changes are absorbed as normal.
 * If the scene produces constant noise (wind, flickering light, trees), the script recalibrates itself automatically. Monitoring is briefly paused while this takes place.
 * Gradual adaptation learns from calm frames only, and may slowly raise the threshold as the camera sensor warms up or ambient light drops. Check `seccam.log` for `Threshold adapted` lines during the first nights.
-* Status messages and remote commands need a working internet connection. During an outage status messages are retried briefly and then dropped, and remote commands are processed once connectivity returns.
+* Status messages and remote commands need a working internet connection. During an outage status messages are retried briefly and then dropped, and remote commands are queued by Telegram (for up to 24 hours) and processed once connectivity returns.
 * Photo capture speed depends on the phone; expect several seconds per frame, so very fast movements can be missed.
 * Detection quality depends on camera placement, lighting, and phone model. Test it before relying on it.
 
