@@ -103,12 +103,12 @@ Restrict access to the file and load it before each run (once per Termux session
 
 ```bash
 chmod 600 ~/.seccam_env
-source ~/.seccam_env
+. ~/.seccam_env
 ```
 
-> 💡 **Tip:** To load these credentials automatically in every new Termux session, append `source ~/.seccam_env` to `~/.bashrc`:
+> 💡 **Tip:** To load these credentials automatically in every new Termux session, append `. ~/.seccam_env` to `~/.bashrc`:
 > ```bash
-> echo 'source ~/.seccam_env' >> ~/.bashrc
+> echo '. ~/.seccam_env' >> ~/.bashrc
 > ```
 
 The `-ch` / `-bt` command-line options also work, but they take priority over the environment variables and are visible in your shell history.
@@ -151,13 +151,14 @@ To make the security camera run automatically whenever the phone boots up or res
    mkdir -p ~/.termux/boot
    nano ~/.termux/boot/start_cam.sh
    ```
-4. Paste the following script inside, then save (`Ctrl + X`, `Y`, `Enter`):
+4. Paste the following script inside (using `.` instead of `source` for dash shell compatibility, plus a 30s network wait):
    ```bash
    #!/data/data/com.termux/files/usr/bin/sh
+   sleep 30
    termux-wake-lock
    cd $HOME/Security-Camera-Termux
    if [ -f ~/.seccam_env ]; then
-       source ~/.seccam_env
+       . ~/.seccam_env
    fi
    python3 SecCam.py > seccam_boot.log 2>&1 &
    ```
@@ -166,7 +167,7 @@ To make the security camera run automatically whenever the phone boots up or res
    chmod +x ~/.termux/boot/start_cam.sh
    ```
 
-Now, whenever the phone powers on, Termux will automatically acquire a wake-lock, navigate to the project directory, load your Telegram credentials, and start the surveillance script in the background.
+Now, whenever the phone powers on, Termux will automatically wait for networking, acquire a wake-lock, navigate to the project directory, load your Telegram credentials, and start the surveillance script in the background.
 
 ---
 
