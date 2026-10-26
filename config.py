@@ -22,6 +22,7 @@ MAX_TG_SAMPLES_NO_VIDEO = 6
 MAX_TG_SAMPLES_WITH_VIDEO = 4
 TG_ALBUM_TIMEOUT = 240
 TG_VIDEO_LIMIT = 49 * 1024 * 1024
+DC_VIDEO_LIMIT = 20 * 1024 * 1024
 
 REQUIRED_TERMUX_BINARIES = (
     "termux-camera-photo",
@@ -77,6 +78,24 @@ def require_curl():
         raise RuntimeError("Telegram needs curl but it is not installed. Run: pkg install curl -y")
 
 
+def has_telegram(args):
+    return bool(getattr(args, "chatid", None) and getattr(args, "bottoken", None))
+
+
+def has_ntfy(args):
+    return bool(getattr(args, "ntfy_topic", None))
+
+
+def has_deltachat(args):
+    return bool(getattr(args, "dc_email", None)
+                and getattr(args, "dc_password", None)
+                and getattr(args, "dc_to", None))
+
+
+def has_any_remote(args):
+    return has_telegram(args) or has_ntfy(args) or has_deltachat(args)
+
+
 def parse_schedule(spec):
     if not spec or spec.strip().lower() in ("off", "none", "all", "24/7"):
         return None
@@ -123,6 +142,24 @@ def validate_args(args):
         sys.exit("Error: bot token format looks wrong")
     if (args.chatid is None) != (args.bottoken is None):
         sys.exit("Error: both chat id and bot token are required for Telegram")
+
+    if args.ntfy_topic is not None:
+        args.ntfy_topic = args.ntfy_topic.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", args.ntfy_topic):
+            sys.exit("Error: --ntfy-topic must be 3-128 characters (letters, digits, _ or -)")
+    if args.ntfy_server:
+        args.ntfy_server = args.ntfy_server.strip().rstrip("/")
+        if not args.ntfy_server.startswith(("http://", "https://")):
+            sys.exit("Error: --ntfy-server must start with http:// or https://")
+
+    dc_fields = (args.dc_email, args.dc_password, args.dc_to)
+    if any(dc_fields) and not all(dc_fields):
+        sys.exit("Error: --dc-email, --dc-password, and --dc-to are all required for DeltaChat")
+    if all(dc_fields):
+        for label, addr in (("--dc-email", args.dc_email), ("--dc-to", args.dc_to)):
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", addr.strip()):
+                sys.exit(f"Error: {label} does not look like a valid email/DeltaChat address")
+
     if args.video not in (0, 1):
         sys.exit("Error: --video must be 0 or 1")
     if not (1 <= args.sensitivity <= 500):
@@ -152,6 +189,16 @@ def parse_args():
     p.add_argument("-st", "--sensitivity", help="Detection sensitivity %% (default: 100)", type=int, default=100)
     p.add_argument("-ch", "--chatid", help="Telegram chat id (or env TG_CHAT_ID)", type=str)
     p.add_argument("-bt", "--bottoken", help="Telegram bot token (or env TG_BOT_TOKEN)", type=str)
+    p.add_argument("--ntfy-topic", help="ntfy topic name for push alerts & remote commands (or env NTFY_TOPIC)", type=str)
+    p.add_argument("--ntfy-server", help="ntfy server URL (default: https://ntfy.sh or env NTFY_SERVER)", type=str)
+    p.add_argument("--ntfy-token", help="ntfy access token if topic is protected (or env NTFY_TOKEN)", type=str)
+    p.add_argument("--dc-email", help="DeltaChat / email sender address (or env DC_EMAIL)", type=str)
+    p.add_argument("--dc-password", help="DeltaChat / email password (or env DC_PASSWORD)", type=str)
+    p.add_argument("--dc-to", help="Recipient DeltaChat address to alert & accept commands from (or env DC_TO)", type=str)
+    p.add_argument("--dc-smtp-host", help="SMTP host override (or env DC_SMTP_HOST)", type=str)
+    p.add_argument("--dc-smtp-port", help="SMTP port override (default: auto 465/587 or env DC_SMTP_PORT)", type=int)
+    p.add_argument("--dc-imap-host", help="IMAP host override (or env DC_IMAP_HOST)", type=str)
+    p.add_argument("--dc-imap-port", help="IMAP SSL port (default: 993 or env DC_IMAP_PORT)", type=int)
     p.add_argument("--schedule", help="Active hours in 24h HH:MM-HH:MM format (e.g. 20:00-08:00)", type=str)
     p.add_argument("--cooldown", help="Min seconds between SMS/call alerts (default: 300)", type=int, default=300)
     p.add_argument("--max-events", help="Keep only newest N event folders (0 = keep all, default: 20)",
@@ -161,7 +208,7 @@ def parse_args():
     p.add_argument("--adapt-minutes", type=float, default=15.0,
                    help="Re-tune threshold from calm frames every N minutes (default: 15, 0 = off)")
     p.add_argument("--status-alerts", choices=["off", "important", "all"], default="important",
-                   help="Telegram status messages: off, important (default), or all")
+                   help="Remote status messages: off, important (default), or all")
     p.add_argument("--heartbeat-hours", type=float, default=0.0,
                    help="Send an 'I am alive' status message every N hours (default: 0 = off)")
     p.add_argument("--log", help="Log file path (default: seccam.log)", default="seccam.log")
@@ -175,6 +222,35 @@ def parse_args():
         args.bottoken = os.environ.get("TG_BOT_TOKEN")
     if args.no_telegram:
         args.chatid = args.bottoken = None
+
+    if args.ntfy_topic is None:
+        args.ntfy_topic = os.environ.get("NTFY_TOPIC")
+    if args.ntfy_server is None:
+        args.ntfy_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+    if args.ntfy_token is None:
+        args.ntfy_token = os.environ.get("NTFY_TOKEN")
+
+    if args.dc_email is None:
+        args.dc_email = os.environ.get("DC_EMAIL")
+    if args.dc_password is None:
+        args.dc_password = os.environ.get("DC_PASSWORD")
+    if args.dc_to is None:
+        args.dc_to = os.environ.get("DC_TO")
+    if args.dc_smtp_host is None:
+        args.dc_smtp_host = os.environ.get("DC_SMTP_HOST")
+    if args.dc_smtp_port is None and os.environ.get("DC_SMTP_PORT"):
+        try:
+            args.dc_smtp_port = int(os.environ["DC_SMTP_PORT"])
+        except ValueError:
+            sys.exit("Error: DC_SMTP_PORT must be an integer")
+    if args.dc_imap_host is None:
+        args.dc_imap_host = os.environ.get("DC_IMAP_HOST")
+    if args.dc_imap_port is None:
+        try:
+            args.dc_imap_port = int(os.environ.get("DC_IMAP_PORT", "993"))
+        except ValueError:
+            sys.exit("Error: DC_IMAP_PORT must be an integer")
+
     validate_args(args)
     return args
 
