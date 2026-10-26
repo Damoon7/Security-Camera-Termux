@@ -1,8 +1,28 @@
 # 📱 Security Camera by Termux
 
-Turn a spare or old Android phone into a motion-detecting security camera using **Termux** and **Python**.
+[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Platform: Android / Termux](https://img.shields.io/badge/Platform-Android%20%7C%20Termux-3DDC84?logo=android&logoColor=white)](https://termux.dev/)
+[![Python: 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Channels: Telegram | ntfy | DeltaChat | SMS](https://img.shields.io/badge/Alerts-Telegram%20%7C%20ntfy%20%7C%20DeltaChat%20%7C%20SMS-blue)](#)
+
+Turn a spare or old Android phone into an intelligent, motion-detecting security camera using **Termux** and **Python**.
 
 The project is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `tg_delta_ntfy_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications and media via **Telegram**, **ntfy**, **DeltaChat**, **SMS**, and **phone call**—while letting you control the camera remotely from Telegram, ntfy, or DeltaChat.
+
+---
+
+## ⚡ Quick Start (60 Seconds)
+
+Already have **Termux** and **Termux:API** installed from F-Droid with Camera & Microphone permissions granted? Run these commands in Termux to get started immediately:
+
+```bash
+pkg update -y && pkg install python python-pillow python-numpy termux-api git curl -y
+git clone https://github.com/Damoon7/Security-Camera-Termux.git
+cd Security-Camera-Termux
+python3 SecCam.py --ntfy-topic my_secret_cam_9876
+```
+
+*(Subscribe to `my_secret_cam_9876` in the free **ntfy** app on your main phone to receive instant motion photos and send remote commands like `/snap`, `/status`, or `/pause 30`—or see below to configure **Telegram** and **DeltaChat**!)*
 
 ---
 
@@ -41,7 +61,7 @@ The project is organized into a clean, modular structure (`SecCam.py`, `config.p
 
 ---
 
-## 🚀 Installation
+## 🚀 Full Installation
 
 Open **Termux** and run:
 
@@ -214,3 +234,9 @@ All remote commands work across **Telegram**, **ntfy**, and **DeltaChat**:
 ## 🔒 Privacy & Legal
 
 This tool records images and audio. Use it only in spaces you own or have permission to monitor, and follow the recording laws and privacy rules of your country. Keep your credentials (`~/.seccam_env`) private and never commit them to the repository.
+
+---
+
+## 📄 License
+
+This project is licensed under the [MIT License](LICENSE).
