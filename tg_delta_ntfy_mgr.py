@@ -33,6 +33,7 @@ HELP_TEXT = (
     "/calibrate - Recalibrate motion sensor now\n"
     "/sensitivity <1-500> - Set sensitivity %\n"
     "/schedule <HH:MM-HH:MM|off> - Set active hours\n"
+    "/update - Pull latest code from GitHub & restart\n"
     "/stop - Safely stop the security camera"
 )
 
@@ -44,6 +45,7 @@ BOT_COMMANDS_SPEC = [
     {"command": "sensitivity", "description": "🎯 Adjust detection sensitivity"},
     {"command": "schedule", "description": "🕒 Set active hours schedule"},
     {"command": "calibrate", "description": "🔧 Recalibrate sensor baseline"},
+    {"command": "update", "description": "🔄 Pull updates from GitHub & restart"},
     {"command": "stop", "description": "🛑 Stop security camera"},
     {"command": "help", "description": "🎛️ Show control panel & help"},
 ]
@@ -53,7 +55,8 @@ MAIN_REPLY_KEYBOARD = {
         [{"text": "📸 Snap"}, {"text": "📊 Status"}],
         [{"text": "⏸️ Pause"}, {"text": "▶️ Resume"}],
         [{"text": "🎯 Sensitivity"}, {"text": "🕒 Schedule"}],
-        [{"text": "🔧 Calibrate"}, {"text": "🛑 Stop"}],
+        [{"text": "🔧 Calibrate"}, {"text": "🔄 Update"}],
+        [{"text": "🛑 Stop"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -67,6 +70,7 @@ BUTTON_TEXT_MAP = {
     "🎯 sensitivity": ("/sensitivity_menu", ""),
     "🕒 schedule": ("/schedule_menu", ""),
     "🔧 calibrate": ("/calibrate", ""),
+    "🔄 update": ("/update", ""),
     "🛑 stop": ("/stop_ask", ""),
 }
 
