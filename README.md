@@ -7,7 +7,7 @@
 
 Turn a spare or old Android phone into an intelligent, motion-detecting security camera using **Termux** and **Python**.
 
-The project is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `tg_delta_ntfy_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications and media via **Telegram**, **ntfy**, **DeltaChat**, **SMS**, and **phone call**—while letting you control the camera remotely from Telegram, ntfy, or DeltaChat.
+The project is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `tg_delta_ntfy_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications and media via **Telegram**, **ntfy**, **DeltaChat**, **SMS**, and **phone call**—while letting you control and update the camera remotely from Telegram, ntfy, or DeltaChat.
 
 ---
 
@@ -33,7 +33,7 @@ python3 SecCam.py --ntfy-topic my_secret_cam_CHANGE_THIS
 * **Modular Architecture:** Cleanly separated into independent modules for configuration (`config.py`), vision processing (`vision.py`), power monitoring (`power.py`), multi-channel remote messaging (`tg_delta_ntfy_mgr.py`), and main execution (`SecCam.py`).
 * **Multi-Channel Alerts & Remote Control (Telegram + ntfy + DeltaChat):** Use Telegram, ntfy, or DeltaChat—individually or all at the same time! Built entirely with Python's standard library (`urllib`, `smtplib`, `imaplib`, `email`) and `curl`, requiring zero heavy extra packages in Termux.
 * **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames.
-* **Interactive Control Panel:** Automatically registers the official Telegram `/` command menu, displays a persistent bottom button pad (`📸 Snap`, `📊 Status`, `⏸️ Pause`, `▶️ Resume`, `🎯 Sensitivity`, `🕒 Schedule`, `🔧 Calibrate`, `🛑 Stop`), attaches quick-action buttons to `ntfy` notifications, and accepts slash commands (`/status`, `/snap`, `/pause`, etc.) across Telegram, ntfy, and DeltaChat.
+* **Interactive Control Panel & Remote Self-Update (`/update`):** Automatically registers the official Telegram `/` command menu, displays a persistent bottom button pad (`📸 Snap`, `📊 Status`, `⏸️ Pause`, `▶️ Resume`, `🎯 Sensitivity`, `🕒 Schedule`, `🔧 Calibrate`, `🔄 Update`, `🛑 Stop`), attaches quick-action buttons to `ntfy` notifications, and lets you pull the latest code from GitHub and restart in-place remotely using `/update`.
 * **Active Hours Scheduling:** Optionally restrict surveillance to specific hours (for example `--schedule 20:00-08:00`). Outside the active window the camera waits in low-power standby and automatically calibrates when the active window begins.
 * **Dynamic Event Recording & Glitch Filter:** Confirming motion across two consecutive frames filters out single-frame autofocus/auto-exposure glitches on older phones, then keeps recording while motion persists and stops once the scene calms down. Both the initial trigger photo and confirmation frame are kept as the first evidence frames.
 * **Optimized Media Alerts:** Sends downscaled Full-HD keyframes (and optional 1280p streaming-ready MP4 video) that upload quickly even on slow mobile networks.
@@ -228,6 +228,7 @@ All remote commands work across **Telegram**, **ntfy**, and **DeltaChat**:
 | **🎯 Sensitivity** (`/sensitivity [1-500]`) | Adjust sensitivity preset or type e.g. `/sensitivity 80` |
 | **🕒 Schedule** (`/schedule [HH:MM-HH:MM\|off]`) | Set active schedule window or `/schedule off` for 24/7 |
 | **🔧 Calibrate** (`/calibrate`) | Re-run full sensor calibration right now |
+| **🔄 Update** (`/update`) | Pull the latest code from GitHub (`git pull --ff-only`), verify syntax, and restart in-place with the same arguments |
 | **🛑 Stop** (`/stop confirm`) | Safely releases hardware resources and exits |
 | `/help` (or `/menu`) | Display the command list (and keyboard in Telegram) |
 
