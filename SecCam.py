@@ -9,6 +9,7 @@ import shutil
 import queue
 import signal
 import threading
+import py_compile
 from datetime import datetime
 from getpass import getpass
 from glob import glob
@@ -176,6 +177,58 @@ def build_status_report(start_time, events, threshold, sensitivity, paused_until
     )
 
 
+def perform_self_update(notifier, remote, jobs, worker):
+    """Pulls the latest code from GitHub, verifies syntax, and restarts in-place."""
+    if shutil.which("git") is None:
+        notifier.reply("❌ Update failed: git is not installed (run: pkg install git -y).")
+        return
+
+    repo_dir = os.path.dirname(os.path.abspath(__file__))
+    notifier.reply("⏳ Checking for updates from GitHub...")
+    res = run_cmd(
+        ["git", "-C", repo_dir, "-c", "core.askPass=", "pull", "--ff-only"],
+        timeout=60
+    )
+    if not command_ok(res):
+        notifier.reply(f"❌ Update failed (git pull):\n{describe_failure(res)}")
+        return
+
+    out = (res.stdout or "").strip()
+    if "already up to date" in out.lower() or "already up-to-date" in out.lower():
+        notifier.reply("✅ Camera is already running the latest version!")
+        return
+
+    for py_file in glob(os.path.join(repo_dir, "*.py")):
+        try:
+            py_compile.compile(py_file, doraise=True)
+        except Exception as exc:
+            log.error("Syntax check failed after git pull (%s): %s", py_file, exc)
+            notifier.reply(f"⚠️ Update downloaded, but syntax check failed ({os.path.basename(py_file)}). Keeping current process running.")
+            return
+
+    summary = out[-300:] if out else "New commits pulled."
+    log.info("Update downloaded:\n%s\nRestarting process in-place...", summary)
+    notifier.reply(f"📦 Update downloaded:\n{summary}\n\n🔄 Restarting camera now...")
+
+    remote.stop()
+    run_cmd(["termux-microphone-record", "-q"], timeout=10)
+    remove_if_exists(TRIGGER_PHOTO)
+    remove_if_exists(TMP_PHOTO)
+    remove_if_exists(SNAP_PHOTO)
+    for snap_tmp in glob("snap_*.jpeg*"):
+        remove_if_exists(snap_tmp)
+
+    if not jobs.empty() or worker.is_alive():
+        try:
+            jobs.put(None)
+            worker.join(timeout=60)
+        except Exception:
+            pass
+
+    notifier.flush(timeout=10)
+    os.execv(sys.executable, [sys.executable] + sys.argv)
+
+
 def telegram_selftest(args):
     require_curl()
     if args.status_alerts == "off":
@@ -205,7 +258,7 @@ def ntfy_selftest(args):
         return True
     ok = ntfy_send_text(
         args,
-        "🔧 Security camera is starting. Send /status, /snap, /pause 30, /resume, or /stop anytime.",
+        "🔧 Security camera is starting. Send /status, /snap, /pause 30, /resume, /update, or /stop anytime.",
         retries=2, timeout=25
     )
     if ok:
@@ -221,7 +274,7 @@ def deltachat_selftest(args):
         return True
     ok = dc_send_message(
         args,
-        "🔧 Security camera is starting. Reply with /status, /snap, /pause 30, /resume, or /stop anytime.",
+        "🔧 Security camera is starting. Reply with /status, /snap, /pause 30, /resume, /update, or /stop anytime.",
         retries=2, timeout=45
     )
     if ok:
@@ -499,6 +552,9 @@ def main():
                                 standby_logged = False
                             except ValueError as exc:
                                 notifier.reply(f"⚠️ {exc}", reply_markup=SCHEDULE_INLINE_KB)
+
+                    elif cmd == "/update":
+                        perform_self_update(notifier, remote, jobs, worker)
 
                     elif cmd == "/stop_ask":
                         notifier.reply("⚠️ Are you sure you want to stop the security camera? (Send /stop confirm to confirm)",
