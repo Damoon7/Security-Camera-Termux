@@ -2,13 +2,22 @@
 import os
 import json
 import queue
+import ssl
+import smtplib
+import imaplib
 import threading
+import urllib.parse
+import urllib.request
+from email import message_from_bytes
+from email.message import EmailMessage
+from email.utils import parseaddr
 from glob import glob
 from time import sleep, time
 import numpy as np
 from config import (
-    run_cmd, log, TG_ALBUM_TIMEOUT, TG_VIDEO_LIMIT,
-    MAX_TG_SAMPLES_NO_VIDEO, MAX_TG_SAMPLES_WITH_VIDEO, remove_if_exists
+    run_cmd, log, TG_ALBUM_TIMEOUT, TG_VIDEO_LIMIT, DC_VIDEO_LIMIT,
+    MAX_TG_SAMPLES_NO_VIDEO, MAX_TG_SAMPLES_WITH_VIDEO, remove_if_exists,
+    has_telegram, has_ntfy, has_deltachat
 )
 from vision import prepare_tg_photo
 
@@ -143,9 +152,129 @@ def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
     return tg_request_raw(token, method, fields=fields, files=files, retries=retries, timeout=timeout) is not None
 
 
-def send_single_photo_to_telegram(cfg, filepath, caption):
+def _ntfy_headers(token=None, topic_url=None, priority="default", include_actions=True):
+    headers = {
+        "X-Tags": "seccam_out",
+        "X-Priority": priority,
+        "User-Agent": "SecCam-Termux/2.0",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if include_actions and topic_url:
+        headers["X-Actions"] = (
+            f"http, Snap, {topic_url}, method=POST, body=/snap, clear=true; "
+            f"http, Status, {topic_url}, method=POST, body=/status, clear=true; "
+            f"http, Pause 30m, {topic_url}, method=POST, body=/pause 30, clear=true"
+        )
+    return headers
+
+
+def ntfy_send_text(server, topic, text, token=None, priority="default", retries=2, timeout=25):
+    topic_url = f"{server.rstrip('/')}/{topic}"
+    headers = _ntfy_headers(token=token, topic_url=topic_url, priority=priority)
+    data = text.encode("utf-8", errors="replace")
+    for attempt in range(1, retries + 1):
+        try:
+            req = urllib.request.Request(topic_url, data=data, headers=headers, method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+        except Exception as exc:
+            if attempt == retries:
+                log.warning("ntfy text send failed: %s", exc)
+        sleep(2 * attempt)
+    return False
+
+
+def ntfy_send_file(server, topic, filepath, caption, token=None, priority="high", retries=2, timeout=90):
+    base_url = f"{server.rstrip('/')}/{topic}"
+    params = urllib.parse.urlencode({
+        "message": caption,
+        "filename": os.path.basename(filepath),
+    })
+    url = f"{base_url}?{params}"
+    headers = _ntfy_headers(token=token, topic_url=base_url, priority=priority)
+    for attempt in range(1, retries + 1):
+        try:
+            with open(filepath, "rb") as f:
+                body = f.read()
+            req = urllib.request.Request(url, data=body, headers=headers, method="PUT")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if 200 <= resp.status < 300:
+                    return True
+        except Exception as exc:
+            if attempt == retries:
+                log.warning("ntfy file upload failed (%s): %s", os.path.basename(filepath), exc)
+        sleep(2 * attempt)
+    return False
+
+
+def _infer_hosts(email_addr, explicit_host, prefix):
+    if explicit_host:
+        return [explicit_host.strip()]
+    domain = email_addr.split("@", 1)[-1].strip()
+    return [f"{prefix}.{domain}", domain]
+
+
+def dc_send_message(args, text, attachments=None, retries=2, timeout=60):
+    if not has_deltachat(args):
+        return False
+    msg = EmailMessage()
+    msg["From"] = args.dc_email
+    msg["To"] = args.dc_to
+    msg["Subject"] = "SecCam"
+    msg["Chat-Version"] = "1.0"
+    msg["X-SecCam-Out"] = "1"
+    msg.set_content(text)
+
+    for path in (attachments or []):
+        if not path or not os.path.exists(path):
+            continue
+        try:
+            ext = os.path.splitext(path)[1].lower()
+            if ext == ".mp4":
+                maintype, subtype = "video", "mp4"
+            else:
+                maintype, subtype = "image", "jpeg"
+            with open(path, "rb") as f:
+                data = f.read()
+            msg.add_attachment(data, maintype=maintype, subtype=subtype,
+                               filename=os.path.basename(path))
+        except Exception as exc:
+            log.warning("DeltaChat could not attach %s: %s", path, exc)
+
+    hosts = _infer_hosts(args.dc_email, getattr(args, "dc_smtp_host", None), "smtp")
+    ports = [args.dc_smtp_port] if getattr(args, "dc_smtp_port", None) else [465, 587]
+    ctx = ssl.create_default_context()
+
+    for attempt in range(1, retries + 1):
+        for host in hosts:
+            for port in ports:
+                try:
+                    if port == 465:
+                        with smtplib.SMTP_SSL(host, port, timeout=timeout, context=ctx) as s:
+                            s.login(args.dc_email, args.dc_password)
+                            s.send_message(msg)
+                            return True
+                    else:
+                        with smtplib.SMTP(host, port, timeout=timeout) as s:
+                            s.ehlo()
+                            s.starttls(context=ctx)
+                            s.ehlo()
+                            s.login(args.dc_email, args.dc_password)
+                            s.send_message(msg)
+                            return True
+                except Exception as exc:
+                    last_err = exc
+        if attempt == retries:
+            log.warning("DeltaChat SMTP send failed: %s", locals().get("last_err", "unknown error"))
+        sleep(2 * attempt)
+    return False
+
+
+def send_single_photo_to_telegram(cfg, filepath, caption, cleanup=True):
     token, chat = cfg["bottoken"], cfg["chatid"]
-    opt_photo = prepare_tg_photo(filepath)
+    opt_photo = prepare_tg_photo(filepath) if cleanup else filepath
     try:
         ok = tg_request(token, "sendPhoto", {"chat_id": chat, "caption": caption},
                         {"photo": opt_photo}, timeout=TG_ALBUM_TIMEOUT)
@@ -153,24 +282,48 @@ def send_single_photo_to_telegram(cfg, filepath, caption):
             tg_request(token, "sendMessage",
                        {"chat_id": chat, "text": caption + " (photo upload failed)"})
     finally:
+        if cleanup:
+            if opt_photo.endswith(".tg.jpg"):
+                remove_if_exists(opt_photo)
+            remove_if_exists(filepath)
+
+
+def send_single_photo_all(args, filepath, caption):
+    opt_photo = prepare_tg_photo(filepath)
+    try:
+        if has_telegram(args):
+            tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
+            send_single_photo_to_telegram(tg_cfg, opt_photo, caption, cleanup=False)
+        if has_ntfy(args):
+            ok = ntfy_send_file(args.ntfy_server, args.ntfy_topic, opt_photo, caption,
+                                token=args.ntfy_token, priority="default")
+            if not ok:
+                ntfy_send_text(args.ntfy_server, args.ntfy_topic,
+                               caption + " (photo upload failed)", token=args.ntfy_token)
+        if has_deltachat(args):
+            ok = dc_send_message(args, caption, attachments=[opt_photo], timeout=120)
+            if not ok:
+                dc_send_message(args, caption + " (photo upload failed)")
+    finally:
         if opt_photo.endswith(".tg.jpg"):
             remove_if_exists(opt_photo)
         remove_if_exists(filepath)
 
 
-def send_event_to_telegram(cfg, folder, video_path, photo_count):
+def send_event_to_telegram(cfg, folder, video_path, photo_count, upload_photos=None):
     token, chat = cfg["bottoken"], cfg["chatid"]
     caption = f"🚨 External object detected ({os.path.basename(folder)}), {photo_count} photos"
 
-    raw_photos = sorted(glob(os.path.join(folder, "*.jpeg")))
-    max_samples = MAX_TG_SAMPLES_WITH_VIDEO if video_path else MAX_TG_SAMPLES_NO_VIDEO
-    if len(raw_photos) > max_samples:
-        idx = sorted(set(np.linspace(0, len(raw_photos) - 1, max_samples).round().astype(int)))
-        selected_photos = [raw_photos[i] for i in idx]
-    else:
-        selected_photos = raw_photos
-
-    upload_photos = [prepare_tg_photo(p) for p in selected_photos]
+    own_photos = upload_photos is None
+    if own_photos:
+        raw_photos = sorted(glob(os.path.join(folder, "*.jpeg")))
+        max_samples = MAX_TG_SAMPLES_WITH_VIDEO if video_path else MAX_TG_SAMPLES_NO_VIDEO
+        if len(raw_photos) > max_samples:
+            idx = sorted(set(np.linspace(0, len(raw_photos) - 1, max_samples).round().astype(int)))
+            selected_photos = [raw_photos[i] for i in idx]
+        else:
+            selected_photos = raw_photos
+        upload_photos = [prepare_tg_photo(p) for p in selected_photos]
 
     try:
         if len(upload_photos) == 1:
@@ -198,6 +351,51 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count):
             else:
                 log.warning("Video too large for Telegram, kept locally: %s", video_path)
     finally:
+        if own_photos:
+            for p in upload_photos:
+                if p.endswith(".tg.jpg"):
+                    remove_if_exists(p)
+
+
+def send_event_all(args, folder, video_path, photo_count):
+    if not (has_telegram(args) or has_ntfy(args) or has_deltachat(args)):
+        return
+    caption = f"🚨 External object detected ({os.path.basename(folder)}), {photo_count} photos"
+
+    raw_photos = sorted(glob(os.path.join(folder, "*.jpeg")))
+    max_samples = MAX_TG_SAMPLES_WITH_VIDEO if video_path else MAX_TG_SAMPLES_NO_VIDEO
+    if len(raw_photos) > max_samples:
+        idx = sorted(set(np.linspace(0, len(raw_photos) - 1, max_samples).round().astype(int)))
+        selected_photos = [raw_photos[i] for i in idx]
+    else:
+        selected_photos = raw_photos
+
+    upload_photos = [prepare_tg_photo(p) for p in selected_photos]
+    try:
+        if has_telegram(args):
+            tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
+            send_event_to_telegram(tg_cfg, folder, video_path, photo_count, upload_photos=upload_photos)
+
+        if has_ntfy(args):
+            if upload_photos:
+                mid_photo = upload_photos[len(upload_photos) // 2]
+                ok = ntfy_send_file(args.ntfy_server, args.ntfy_topic, mid_photo, caption,
+                                    token=args.ntfy_token, priority="high")
+                if not ok:
+                    ntfy_send_text(args.ntfy_server, args.ntfy_topic, caption,
+                                   token=args.ntfy_token, priority="high")
+            else:
+                ntfy_send_text(args.ntfy_server, args.ntfy_topic, caption,
+                               token=args.ntfy_token, priority="high")
+
+        if has_deltachat(args):
+            attachments = list(upload_photos)
+            if video_path and os.path.exists(video_path) and os.path.getsize(video_path) <= DC_VIDEO_LIMIT:
+                attachments.append(video_path)
+            ok = dc_send_message(args, caption, attachments=attachments, timeout=240)
+            if not ok:
+                dc_send_message(args, caption + " (media upload failed, files kept on phone)")
+    finally:
         for p in upload_photos:
             if p.endswith(".tg.jpg"):
                 remove_if_exists(p)
@@ -205,10 +403,14 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count):
 
 class StatusNotifier:
     def __init__(self, args):
+        self.args = args
         self.token = args.bottoken
         self.chat = args.chatid
         self.mode = args.status_alerts
-        self.available = bool(self.token and self.chat)
+        self.tg_enabled = has_telegram(args)
+        self.ntfy_enabled = has_ntfy(args)
+        self.dc_enabled = has_deltachat(args)
+        self.available = self.tg_enabled or self.ntfy_enabled or self.dc_enabled
         self._last_sent = {}
         self._q = queue.Queue()
         self._thread = None
@@ -226,7 +428,12 @@ class StatusNotifier:
         return not (level == "all" and self.mode != "all")
 
     def _clean(self, text):
-        return text.replace(self.token, "***")[:1000]
+        cleaned = text
+        for secret in (self.token, getattr(self.args, "ntfy_token", None),
+                       getattr(self.args, "dc_password", None)):
+            if secret:
+                cleaned = cleaned.replace(secret, "***")
+        return cleaned[:1000]
 
     def send(self, text, level="important", force=False, reply_markup=None):
         if self._wanted(level, force):
@@ -245,6 +452,18 @@ class StatusNotifier:
             self._last_sent[key] = now
             self._q.put((self._clean(text), None))
 
+    def _deliver(self, text, markup, retries=2, timeout=30):
+        if self.tg_enabled:
+            fields = {"chat_id": self.chat, "text": text}
+            if markup is not None:
+                fields["reply_markup"] = json.dumps(markup)
+            tg_request(self.token, "sendMessage", fields, retries=retries, timeout=timeout)
+        if self.ntfy_enabled:
+            ntfy_send_text(self.args.ntfy_server, self.args.ntfy_topic, text,
+                           token=self.args.ntfy_token, retries=retries, timeout=timeout)
+        if self.dc_enabled:
+            dc_send_message(self.args, text, retries=retries, timeout=timeout)
+
     def _run(self):
         while True:
             item = self._q.get()
@@ -252,10 +471,7 @@ class StatusNotifier:
                 return
             text, markup = item
             try:
-                fields = {"chat_id": self.chat, "text": text}
-                if markup is not None:
-                    fields["reply_markup"] = json.dumps(markup)
-                tg_request(self.token, "sendMessage", fields, retries=2, timeout=30)
+                self._deliver(text, markup, retries=2, timeout=30)
             except Exception:
                 log.exception("Status message failed")
 
@@ -266,22 +482,32 @@ class StatusNotifier:
 
     def send_now(self, text, level="important", force=False):
         if self._wanted(level, force):
-            tg_request(self.token, "sendMessage", {"chat_id": self.chat, "text": self._clean(text)},
-                       retries=1, timeout=15)
+            self._deliver(self._clean(text), None, retries=1, timeout=15)
 
 
 class TelegramController:
     def __init__(self, args, notifier):
+        self.args = args
         self.token = args.bottoken
         self.chat = str(args.chatid) if args.chatid is not None else None
         self.notifier = notifier
         self.commands = queue.Queue()
         self.wake_event = threading.Event()
         self._stop_event = threading.Event()
-        self._thread = None
-        if self.token and self.chat:
-            self._thread = threading.Thread(target=self._poll_loop, daemon=True)
-            self._thread.start()
+        self._threads = []
+
+        if has_telegram(args):
+            t = threading.Thread(target=self._poll_telegram_loop, daemon=True)
+            t.start()
+            self._threads.append(t)
+        if has_ntfy(args):
+            t = threading.Thread(target=self._poll_ntfy_loop, daemon=True)
+            t.start()
+            self._threads.append(t)
+        if has_deltachat(args):
+            t = threading.Thread(target=self._poll_deltachat_loop, daemon=True)
+            t.start()
+            self._threads.append(t)
 
     def stop(self):
         self._stop_event.set()
@@ -311,7 +537,22 @@ class TelegramController:
         self.commands.put((cmd, arg))
         self.wake_event.set()
 
-    def _poll_loop(self):
+    def _handle_incoming_text(self, text):
+        text = (text or "").strip()
+        if not text:
+            return
+        first_line = next((ln.strip() for ln in text.splitlines()
+                           if ln.strip() and not ln.strip().startswith(">")), "")
+        if not first_line:
+            return
+        mapped = BUTTON_TEXT_MAP.get(first_line.lower())
+        if mapped:
+            self.commands.put(mapped)
+            self.wake_event.set()
+        elif first_line.startswith("/"):
+            self._enqueue_raw_command(first_line)
+
+    def _poll_telegram_loop(self):
         self._register_bot_menu()
         offset = self._flush_old_updates()
         fail_streak = 0
@@ -347,13 +588,108 @@ class TelegramController:
                 sender_chat = str((msg.get("chat") or {}).get("id", ""))
                 if sender_chat != self.chat:
                     continue
-                text = (msg.get("text") or "").strip()
-                if not text:
-                    continue
+                self._handle_incoming_text(msg.get("text"))
 
-                mapped = BUTTON_TEXT_MAP.get(text.lower())
-                if mapped:
-                    self.commands.put(mapped)
-                    self.wake_event.set()
-                elif text.startswith("/"):
-                    self._enqueue_raw_command(text)
+    def _poll_ntfy_loop(self):
+        server = self.args.ntfy_server.rstrip("/")
+        topic = self.args.ntfy_topic
+        since_cursor = str(int(time()))
+        headers = {"User-Agent": "SecCam-Termux/2.0"}
+        if self.args.ntfy_token:
+            headers["Authorization"] = f"Bearer {self.args.ntfy_token}"
+
+        while not self._stop_event.is_set():
+            url = f"{server}/{topic}/json?poll=1&since={urllib.parse.quote(since_cursor)}"
+            try:
+                req = urllib.request.Request(url, headers=headers, method="GET")
+                with urllib.request.urlopen(req, timeout=20) as resp:
+                    raw_lines = resp.read().decode("utf-8", errors="replace").splitlines()
+                for line in raw_lines:
+                    if not line.strip():
+                        continue
+                    try:
+                        item = json.loads(line)
+                    except ValueError:
+                        continue
+                    if item.get("id"):
+                        since_cursor = item["id"]
+                    if item.get("event") != "message":
+                        continue
+                    tags = item.get("tags") or []
+                    if "seccam_out" in tags:
+                        continue
+                    self._handle_incoming_text(item.get("message"))
+            except Exception:
+                pass
+            self._stop_event.wait(timeout=8)
+
+    def _connect_imap(self):
+        hosts = _infer_hosts(self.args.dc_email, getattr(self.args, "dc_imap_host", None), "imap")
+        port = getattr(self.args, "dc_imap_port", 993) or 993
+        ctx = ssl.create_default_context()
+        for host in hosts:
+            try:
+                M = imaplib.IMAP4_SSL(host, port, ssl_context=ctx)
+                M.login(self.args.dc_email, self.args.dc_password)
+                M.select("INBOX")
+                return M
+            except Exception:
+                continue
+        return None
+
+    def _extract_email_text(self, msg):
+        if msg.is_multipart():
+            for part in msg.walk():
+                if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+                    payload = part.get_payload(decode=True)
+                    if payload is not None:
+                        charset = part.get_content_charset() or "utf-8"
+                        return payload.decode(charset, errors="replace")
+        else:
+            payload = msg.get_payload(decode=True)
+            if payload is not None:
+                charset = msg.get_content_charset() or "utf-8"
+                return payload.decode(charset, errors="replace")
+        return ""
+
+    def _poll_deltachat_loop(self):
+        last_uid = None
+        allowed_sender = self.args.dc_to.strip().lower()
+
+        while not self._stop_event.is_set():
+            M = self._connect_imap()
+            if M is None:
+                self._stop_event.wait(timeout=20)
+                continue
+            try:
+                typ, data = M.uid("SEARCH", None, "ALL")
+                if typ == "OK" and data and data[0]:
+                    uids = [int(x) for x in data[0].split() if x.isdigit()]
+                else:
+                    uids = []
+
+                if last_uid is None:
+                    last_uid = max(uids) if uids else 0
+                else:
+                    new_uids = [u for u in uids if u > last_uid]
+                    for u in sorted(new_uids):
+                        last_uid = max(last_uid, u)
+                        ftyp, fdata = M.uid("FETCH", str(u), "(BODY.PEEK[])")
+                        if ftyp != "OK" or not fdata or not isinstance(fdata[0], tuple):
+                            continue
+                        msg = message_from_bytes(fdata[0][1])
+                        if msg.get("X-SecCam-Out") == "1":
+                            continue
+                        sender = parseaddr(msg.get("From", ""))[1].strip().lower()
+                        if sender != allowed_sender:
+                            continue
+                        body = self._extract_email_text(msg)
+                        self._handle_incoming_text(body)
+            except Exception:
+                pass
+            finally:
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+            self._stop_event.wait(timeout=12)
