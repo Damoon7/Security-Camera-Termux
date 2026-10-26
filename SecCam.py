@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Security Camera for Termux (Modularized Version)."""
+"""Security Camera for Termux (Modularized Version with Telegram, ntfy & DeltaChat)."""
 import os
 import re
 import sys
@@ -18,16 +18,17 @@ from config import (
     parse_args, setup_logging, check_runtime_environment,
     EVENTS_DIR, TMP_PHOTO, TRIGGER_PHOTO, SNAP_PHOTO, PHOTO_TIMEOUT,
     MAX_PHOTOS_PER_EVENT, run_cmd, remove_if_exists, command_ok, describe_failure,
-    require_curl, parse_schedule, format_schedule, is_within_schedule, log
+    require_curl, parse_schedule, format_schedule, is_within_schedule, log,
+    has_telegram, has_ntfy, has_deltachat, has_any_remote
 )
 from vision import (
     check_camera, setup_num, ThresholdAdapter, dif_of_images,
     take_processed_photo, process_image_file
 )
 from power import PowerMonitor
-from telegram_mgr import (
-    StatusNotifier, TelegramController, send_event_to_telegram,
-    send_single_photo_to_telegram, tg_request,
+from tg_delta_ntfy_mgr import (
+    StatusNotifier, TelegramController, send_event_all,
+    send_single_photo_all, tg_request, ntfy_send_text, dc_send_message,
     HELP_TEXT, MAIN_REPLY_KEYBOARD, PAUSE_INLINE_KB,
     SENSITIVITY_INLINE_KB, SCHEDULE_INLINE_KB, STOP_CONFIRM_INLINE_KB
 )
@@ -70,9 +71,6 @@ def prune_events(max_events):
 
 
 def worker_loop(q, args):
-    tg_cfg = None
-    if args.chatid and args.bottoken:
-        tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
     while True:
         item = q.get()
         if item is None:
@@ -82,15 +80,15 @@ def worker_loop(q, args):
         try:
             if kind == "snap":
                 _, snap_path, caption = item
-                if tg_cfg:
-                    send_single_photo_to_telegram(tg_cfg, snap_path, caption)
+                if has_any_remote(args):
+                    send_single_photo_all(args, snap_path, caption)
                 else:
                     remove_if_exists(snap_path)
             else:
                 _, folder, audio_path, fr, photo_count = item
                 video_path = build_video(folder, audio_path, fr) if args.video == 1 else None
-                if tg_cfg:
-                    send_event_to_telegram(tg_cfg, folder, video_path, photo_count)
+                if has_any_remote(args):
+                    send_event_all(args, folder, video_path, photo_count)
                 prune_events(args.max_events)
         except Exception:
             log.exception("Background processing failed")
@@ -201,34 +199,71 @@ def telegram_selftest(args):
     return ok
 
 
+def ntfy_selftest(args):
+    if args.status_alerts == "off":
+        log.info("ntfy: enabled (topic %s on %s)", args.ntfy_topic, args.ntfy_server)
+        return True
+    ok = ntfy_send_text(
+        args.ntfy_server, args.ntfy_topic,
+        "🔧 Security camera is starting. Send /status, /snap, /pause 30, /resume, or /stop anytime.",
+        token=args.ntfy_token, retries=2, timeout=25
+    )
+    if ok:
+        log.info("ntfy: enabled (test notification sent to %s/%s)", args.ntfy_server, args.ntfy_topic)
+    else:
+        log.warning("ntfy: connection test FAILED. Check --ntfy-server / --ntfy-topic.")
+    return ok
+
+
+def deltachat_selftest(args):
+    if args.status_alerts == "off":
+        log.info("DeltaChat: enabled (%s -> %s)", args.dc_email, args.dc_to)
+        return True
+    ok = dc_send_message(
+        args,
+        "🔧 Security camera is starting. Reply with /status, /snap, /pause 30, /resume, or /stop anytime.",
+        retries=2, timeout=45
+    )
+    if ok:
+        log.info("DeltaChat: enabled (test message sent to %s)", args.dc_to)
+    else:
+        log.warning("DeltaChat: SMTP test FAILED. Check --dc-email / --dc-password / --dc-smtp-host.")
+    return ok
+
+
 def resolve_telegram(args):
-    if args.chatid and args.bottoken:
+    if has_telegram(args):
         telegram_selftest(args)
+    if has_ntfy(args):
+        ntfy_selftest(args)
+    if has_deltachat(args):
+        deltachat_selftest(args)
+    if has_any_remote(args):
         return
 
     if getattr(args, "no_telegram", False):
-        log.info("Telegram: disabled (--no-telegram)")
+        log.info("Remote alerts: disabled (--no-telegram)")
         return
 
     if not sys.stdin.isatty():
-        log.warning("Telegram: disabled (no credentials found)")
+        log.warning("Remote alerts: disabled (no credentials found)")
         return
 
     try:
-        answer = input("Telegram credentials not found. Continue WITHOUT Telegram alerts? [y/N]: ")
+        answer = input("No remote alert credentials (Telegram/ntfy/DeltaChat) found. Continue WITHOUT remote alerts? [y/N]: ")
     except EOFError:
         answer = "y"
     if answer.strip().lower() in ("y", "yes"):
-        log.info("Telegram: disabled (confirmed)")
+        log.info("Remote alerts: disabled (confirmed)")
         return
 
     try:
         for _ in range(3):
-            token = getpass("Bot token (hidden, leave empty to cancel): ").strip()
+            token = getpass("Telegram Bot token (hidden, leave empty to cancel): ").strip()
             if not token:
                 log.info("Telegram: disabled (cancelled)")
                 return
-            chat = input("Chat ID: ").strip()
+            chat = input("Telegram Chat ID: ").strip()
             if re.fullmatch(r"\d+:[A-Za-z0-9_-]+", token) and re.fullmatch(r"-?\d+", chat):
                 args.bottoken, args.chatid = token, chat
                 telegram_selftest(args)
@@ -236,7 +271,7 @@ def resolve_telegram(args):
             print("Invalid format. Try again.")
     except EOFError:
         pass
-    log.warning("Telegram: disabled (no valid credentials entered)")
+    log.warning("Remote alerts: disabled (no valid credentials entered)")
 
 
 STOP_REASON = {"text": "stopped by user (Ctrl+C)"}
@@ -284,7 +319,7 @@ def main():
     power = PowerMonitor(notifier)
     remote = TelegramController(args, notifier)
     if args.heartbeat_hours > 0 and not notifier.available:
-        log.warning("--heartbeat-hours ignored: Telegram is not enabled")
+        log.warning("--heartbeat-hours ignored: no remote channel (Telegram/ntfy/DeltaChat) is enabled")
 
     jobs = queue.Queue()
     worker = threading.Thread(target=worker_loop, args=(jobs, args), daemon=True)
@@ -350,7 +385,7 @@ def main():
                 recalibrate_requested = False
                 while not remote.commands.empty():
                     cmd, arg = remote.commands.get_nowait()
-                    log.info("\n[Telegram Command] %s %s", cmd, arg)
+                    log.info("\n[Remote Command] %s %s", cmd, arg)
 
                     if cmd in ("/help", "/start", "/menu"):
                         notifier.reply(HELP_TEXT, reply_markup=MAIN_REPLY_KEYBOARD)
@@ -363,13 +398,13 @@ def main():
                         ))
 
                     elif cmd == "/pause_menu":
-                        notifier.reply("⏸️ Choose how long to pause monitoring:",
+                        notifier.reply("⏸️ Choose how long to pause monitoring (or send /pause <minutes>):",
                                        reply_markup=PAUSE_INLINE_KB)
 
                     elif cmd == "/pause":
                         if not arg:
                             paused_until = float("inf")
-                            notifier.reply("⏸️ Monitoring paused indefinitely. Tap ▶️ Resume to continue.")
+                            notifier.reply("⏸️ Monitoring paused indefinitely. Send /resume to continue.")
                         else:
                             try:
                                 mins = float(arg)
@@ -378,7 +413,7 @@ def main():
                                 paused_until = time() + mins * 60.0
                                 notifier.reply(f"⏸️ Monitoring paused for {mins:g} minutes.")
                             except ValueError:
-                                notifier.reply("⚠️ Choose a duration below or type /pause <minutes>:",
+                                notifier.reply("⚠️ Choose a duration below or send /pause <minutes>:",
                                                reply_markup=PAUSE_INLINE_KB)
 
                     elif cmd == "/resume":
@@ -401,10 +436,9 @@ def main():
                         run_cmd(["termux-camera-photo", "-c", args.camera, snap_file], timeout=PHOTO_TIMEOUT)
                         if os.path.exists(snap_file):
                             stamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                            tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
                             threading.Thread(
-                                target=send_single_photo_to_telegram,
-                                args=(tg_cfg, snap_file, f"📸 Snapshot ({stamp})"),
+                                target=send_single_photo_all,
+                                args=(args, snap_file, f"📸 Snapshot ({stamp})"),
                                 daemon=True
                             ).start()
                         else:
@@ -415,14 +449,14 @@ def main():
 
                     elif cmd == "/sensitivity_menu":
                         notifier.reply(
-                            f"🎯 Current sensitivity: {args.sensitivity}%\nSelect a preset below:",
+                            f"🎯 Current sensitivity: {args.sensitivity}%\nSelect a preset or send /sensitivity <1-500>:",
                             reply_markup=SENSITIVITY_INLINE_KB
                         )
 
                     elif cmd == "/sensitivity":
                         if not arg:
                             notifier.reply(
-                                f"🎯 Current sensitivity: {args.sensitivity}%\nSelect a preset below:",
+                                f"🎯 Current sensitivity: {args.sensitivity}%\nSelect a preset or send /sensitivity <1-500>:",
                                 reply_markup=SENSITIVITY_INLINE_KB
                             )
                         else:
@@ -442,19 +476,19 @@ def main():
                                     + (f"(new threshold: {int(delta):,})" if delta else "")
                                 )
                             except ValueError:
-                                notifier.reply("⚠️ Select a preset or type /sensitivity <1-500>:",
+                                notifier.reply("⚠️ Select a preset or send /sensitivity <1-500>:",
                                                reply_markup=SENSITIVITY_INLINE_KB)
 
                     elif cmd == "/schedule_menu":
                         notifier.reply(
-                            f"🕒 Current schedule: {format_schedule(schedule_parsed)}\nChoose a schedule below:",
+                            f"🕒 Current schedule: {format_schedule(schedule_parsed)}\nChoose a schedule or send /schedule HH:MM-HH:MM:",
                             reply_markup=SCHEDULE_INLINE_KB
                         )
 
                     elif cmd == "/schedule":
                         if not arg:
                             notifier.reply(
-                                f"🕒 Current schedule: {format_schedule(schedule_parsed)}\nChoose a schedule below:",
+                                f"🕒 Current schedule: {format_schedule(schedule_parsed)}\nChoose a schedule or send /schedule HH:MM-HH:MM:",
                                 reply_markup=SCHEDULE_INLINE_KB
                             )
                         else:
@@ -467,7 +501,7 @@ def main():
                                 notifier.reply(f"⚠️ {exc}", reply_markup=SCHEDULE_INLINE_KB)
 
                     elif cmd == "/stop_ask":
-                        notifier.reply("⚠️ Are you sure you want to stop the security camera?",
+                        notifier.reply("⚠️ Are you sure you want to stop the security camera? (Send /stop confirm to confirm)",
                                        reply_markup=STOP_CONFIRM_INLINE_KB)
 
                     elif cmd == "/cancel_stop":
@@ -475,9 +509,9 @@ def main():
 
                     elif cmd == "/stop":
                         if arg.lower() == "confirm":
-                            STOP_REASON["text"] = "stopped remotely via Telegram (/stop)"
+                            STOP_REASON["text"] = "stopped remotely (/stop)"
                             raise KeyboardInterrupt
-                        notifier.reply("⚠️ Confirm stopping the security camera:",
+                        notifier.reply("⚠️ Confirm stopping the security camera (tap button or send /stop confirm):",
                                        reply_markup=STOP_CONFIRM_INLINE_KB)
 
                     else:
