@@ -15,20 +15,17 @@ from glob import glob
 from time import sleep, time
 
 from config import (
-    parse_args, setup_logging, check_runtime_environment,
-    EVENTS_DIR, TMP_PHOTO, TRIGGER_PHOTO, SNAP_PHOTO, PHOTO_TIMEOUT,
+    parse_args, setup_logging, check_runtime_environment, validate_args,
+    EVENTS_DIR, TMP_PHOTO, TRIGGER_PHOTO, SNAP_PHOTO,
     MAX_PHOTOS_PER_EVENT, run_cmd, remove_if_exists, command_ok, describe_failure,
-    require_curl, parse_schedule, format_schedule, is_within_schedule, log,
+    require_curl, format_schedule, is_within_schedule, log,
     has_telegram, has_ntfy, has_deltachat, has_any_remote
 )
-from vision import (
-    check_camera, setup_num, ThresholdAdapter, dif_of_images,
-    take_processed_photo, process_image_file
-)
+from vision import check_camera, setup_num, ThresholdAdapter, dif_of_images, take_processed_photo
 from power import PowerMonitor
 from tg_delta_ntfy_mgr import (
-    StatusNotifier, TelegramController, send_event_all,
-    send_single_photo_all, tg_request, ntfy_send_text, dc_send_message,
+    StatusNotifier, TelegramController, send_event_all, send_single_photo_all,
+    tg_request, ntfy_send_text, dc_send_message,
     HELP_TEXT, MAIN_REPLY_KEYBOARD, PAUSE_INLINE_KB,
     SENSITIVITY_INLINE_KB, SCHEDULE_INLINE_KB, STOP_CONFIRM_INLINE_KB
 )
@@ -127,6 +124,7 @@ def record_event(camera_id, first_img, noise_cutoff, delta, trigger_photo=None, 
         print(f"Recording event... captured: {photo_index} photos   ", end="\r")
 
         run_cmd(["termux-camera-photo", "-c", camera_id, photo_path], timeout=PHOTO_TIMEOUT)
+        from vision import process_image_file
         cur_img = process_image_file(photo_path)
         if cur_img is None:
             photo_index -= 1
@@ -204,14 +202,14 @@ def ntfy_selftest(args):
         log.info("ntfy: enabled (topic %s on %s)", args.ntfy_topic, args.ntfy_server)
         return True
     ok = ntfy_send_text(
-        args.ntfy_server, args.ntfy_topic,
+        args,
         "🔧 Security camera is starting. Send /status, /snap, /pause 30, /resume, or /stop anytime.",
-        token=args.ntfy_token, retries=2, timeout=25
+        retries=2, timeout=25
     )
     if ok:
         log.info("ntfy: enabled (test notification sent to %s/%s)", args.ntfy_server, args.ntfy_topic)
     else:
-        log.warning("ntfy: connection test FAILED. Check --ntfy-server / --ntfy-topic.")
+        log.warning("ntfy: connection test FAILED. Check server, topic, and credentials.")
     return ok
 
 
@@ -227,7 +225,7 @@ def deltachat_selftest(args):
     if ok:
         log.info("DeltaChat: enabled (test message sent to %s)", args.dc_to)
     else:
-        log.warning("DeltaChat: SMTP test FAILED. Check --dc-email / --dc-password / --dc-smtp-host.")
+        log.warning("DeltaChat: SMTP test FAILED. Check email, password, and SMTP hosts.")
     return ok
 
 
@@ -319,7 +317,7 @@ def main():
     power = PowerMonitor(notifier)
     remote = TelegramController(args, notifier)
     if args.heartbeat_hours > 0 and not notifier.available:
-        log.warning("--heartbeat-hours ignored: no remote channel (Telegram/ntfy/DeltaChat) is enabled")
+        log.warning("--heartbeat-hours ignored: no remote channel is enabled")
 
     jobs = queue.Queue()
     worker = threading.Thread(target=worker_loop, args=(jobs, args), daemon=True)
