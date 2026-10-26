@@ -6,6 +6,7 @@ import ssl
 import smtplib
 import imaplib
 import threading
+import base64
 import urllib.parse
 import urllib.request
 from email import message_from_bytes
@@ -120,6 +121,9 @@ STOP_CONFIRM_INLINE_KB = {
 }
 
 
+# --------------------------------------------------------------------------- #
+# 1. Telegram transport
+# --------------------------------------------------------------------------- #
 def tg_request_raw(token, method, fields=None, files=None, retries=3, timeout=90):
     for attempt in range(1, retries + 1):
         cmd = ["curl", "-s", "--connect-timeout", "15", "--max-time", str(timeout), "-K", "-"]
@@ -152,14 +156,22 @@ def tg_request(token, method, fields=None, files=None, retries=3, timeout=90):
     return tg_request_raw(token, method, fields=fields, files=files, retries=retries, timeout=timeout) is not None
 
 
-def _ntfy_headers(token=None, topic_url=None, priority="default", include_actions=True):
+# --------------------------------------------------------------------------- #
+# 2. ntfy transport (Supports Basic Auth & Bearer Token)
+# --------------------------------------------------------------------------- #
+def _ntfy_headers(args, topic_url=None, priority="default", include_actions=True):
     headers = {
         "X-Tags": "seccam_out",
         "X-Priority": priority,
         "User-Agent": "SecCam-Termux/2.0",
     }
-    if token:
-        headers["Authorization"] = f"Bearer {token}"
+    if getattr(args, "ntfy_user", None) and getattr(args, "ntfy_password", None):
+        credentials = f"{args.ntfy_user}:{args.ntfy_password}"
+        encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+        headers["Authorization"] = f"Basic {encoded}"
+    elif getattr(args, "ntfy_token", None):
+        headers["Authorization"] = f"Bearer {args.ntfy_token}"
+
     if include_actions and topic_url:
         headers["X-Actions"] = (
             f"http, Snap, {topic_url}, method=POST, body=/snap, clear=true; "
@@ -169,9 +181,11 @@ def _ntfy_headers(token=None, topic_url=None, priority="default", include_action
     return headers
 
 
-def ntfy_send_text(server, topic, text, token=None, priority="default", retries=2, timeout=25):
-    topic_url = f"{server.rstrip('/')}/{topic}"
-    headers = _ntfy_headers(token=token, topic_url=topic_url, priority=priority)
+def ntfy_send_text(args, text, priority="default", retries=2, timeout=25):
+    if not has_ntfy(args):
+        return False
+    topic_url = f"{args.ntfy_server.rstrip('/')}/{args.ntfy_topic}"
+    headers = _ntfy_headers(args, topic_url=topic_url, priority=priority)
     data = text.encode("utf-8", errors="replace")
     for attempt in range(1, retries + 1):
         try:
@@ -186,14 +200,16 @@ def ntfy_send_text(server, topic, text, token=None, priority="default", retries=
     return False
 
 
-def ntfy_send_file(server, topic, filepath, caption, token=None, priority="high", retries=2, timeout=90):
-    base_url = f"{server.rstrip('/')}/{topic}"
+def ntfy_send_file(args, filepath, caption, priority="high", retries=2, timeout=90):
+    if not has_ntfy(args):
+        return False
+    base_url = f"{args.ntfy_server.rstrip('/')}/{args.ntfy_topic}"
     params = urllib.parse.urlencode({
         "message": caption,
         "filename": os.path.basename(filepath),
     })
     url = f"{base_url}?{params}"
-    headers = _ntfy_headers(token=token, topic_url=base_url, priority=priority)
+    headers = _ntfy_headers(args, topic_url=base_url, priority=priority)
     for attempt in range(1, retries + 1):
         try:
             with open(filepath, "rb") as f:
@@ -209,6 +225,9 @@ def ntfy_send_file(server, topic, filepath, caption, token=None, priority="high"
     return False
 
 
+# --------------------------------------------------------------------------- #
+# 3. DeltaChat transport
+# --------------------------------------------------------------------------- #
 def _infer_hosts(email_addr, explicit_host, prefix):
     if explicit_host:
         return [explicit_host.strip()]
@@ -272,34 +291,23 @@ def dc_send_message(args, text, attachments=None, retries=2, timeout=60):
     return False
 
 
-def send_single_photo_to_telegram(cfg, filepath, caption, cleanup=True):
-    token, chat = cfg["bottoken"], cfg["chatid"]
-    opt_photo = prepare_tg_photo(filepath) if cleanup else filepath
-    try:
-        ok = tg_request(token, "sendPhoto", {"chat_id": chat, "caption": caption},
-                        {"photo": opt_photo}, timeout=TG_ALBUM_TIMEOUT)
-        if not ok:
-            tg_request(token, "sendMessage",
-                       {"chat_id": chat, "text": caption + " (photo upload failed)"})
-    finally:
-        if cleanup:
-            if opt_photo.endswith(".tg.jpg"):
-                remove_if_exists(opt_photo)
-            remove_if_exists(filepath)
-
-
+# --------------------------------------------------------------------------- #
+# Unified Dispatchers (Telegram + ntfy + DeltaChat)
+# --------------------------------------------------------------------------- #
 def send_single_photo_all(args, filepath, caption):
     opt_photo = prepare_tg_photo(filepath)
     try:
         if has_telegram(args):
             tg_cfg = {"chatid": args.chatid, "bottoken": args.bottoken}
-            send_single_photo_to_telegram(tg_cfg, opt_photo, caption, cleanup=False)
-        if has_ntfy(args):
-            ok = ntfy_send_file(args.ntfy_server, args.ntfy_topic, opt_photo, caption,
-                                token=args.ntfy_token, priority="default")
+            token, chat = tg_cfg["bottoken"], tg_cfg["chatid"]
+            ok = tg_request(token, "sendPhoto", {"chat_id": chat, "caption": caption},
+                            {"photo": opt_photo}, timeout=TG_ALBUM_TIMEOUT)
             if not ok:
-                ntfy_send_text(args.ntfy_server, args.ntfy_topic,
-                               caption + " (photo upload failed)", token=args.ntfy_token)
+                tg_request(token, "sendMessage", {"chat_id": chat, "text": caption + " (photo upload failed)"})
+        if has_ntfy(args):
+            ok = ntfy_send_file(args, opt_photo, caption, priority="default")
+            if not ok:
+                ntfy_send_text(args, caption + " (photo upload failed)")
         if has_deltachat(args):
             ok = dc_send_message(args, caption, attachments=[opt_photo], timeout=120)
             if not ok:
@@ -313,7 +321,6 @@ def send_single_photo_all(args, filepath, caption):
 def send_event_to_telegram(cfg, folder, video_path, photo_count, upload_photos=None):
     token, chat = cfg["bottoken"], cfg["chatid"]
     caption = f"🚨 External object detected ({os.path.basename(folder)}), {photo_count} photos"
-
     own_photos = upload_photos is None
     if own_photos:
         raw_photos = sorted(glob(os.path.join(folder, "*.jpeg")))
@@ -341,7 +348,7 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count, upload_photos=N
 
         if not ok and upload_photos:
             tg_request(token, "sendMessage",
-                       {"chat_id": chat, "text": caption + " (photo upload failed, files kept on phone)"})
+                       {"chat_id": chat, "text": caption + " (photo upload failed)"})
 
         if video_path and os.path.exists(video_path):
             if os.path.getsize(video_path) <= TG_VIDEO_LIMIT:
@@ -358,7 +365,7 @@ def send_event_to_telegram(cfg, folder, video_path, photo_count, upload_photos=N
 
 
 def send_event_all(args, folder, video_path, photo_count):
-    if not (has_telegram(args) or has_ntfy(args) or has_deltachat(args)):
+    if not has_any_remote(args):
         return
     caption = f"🚨 External object detected ({os.path.basename(folder)}), {photo_count} photos"
 
@@ -379,14 +386,11 @@ def send_event_all(args, folder, video_path, photo_count):
         if has_ntfy(args):
             if upload_photos:
                 mid_photo = upload_photos[len(upload_photos) // 2]
-                ok = ntfy_send_file(args.ntfy_server, args.ntfy_topic, mid_photo, caption,
-                                    token=args.ntfy_token, priority="high")
+                ok = ntfy_send_file(args, mid_photo, caption, priority="high")
                 if not ok:
-                    ntfy_send_text(args.ntfy_server, args.ntfy_topic, caption,
-                                   token=args.ntfy_token, priority="high")
+                    ntfy_send_text(args, caption, priority="high")
             else:
-                ntfy_send_text(args.ntfy_server, args.ntfy_topic, caption,
-                               token=args.ntfy_token, priority="high")
+                ntfy_send_text(args, caption, priority="high")
 
         if has_deltachat(args):
             attachments = list(upload_photos)
@@ -394,13 +398,16 @@ def send_event_all(args, folder, video_path, photo_count):
                 attachments.append(video_path)
             ok = dc_send_message(args, caption, attachments=attachments, timeout=240)
             if not ok:
-                dc_send_message(args, caption + " (media upload failed, files kept on phone)")
+                dc_send_message(args, caption + " (media upload failed)")
     finally:
         for p in upload_photos:
             if p.endswith(".tg.jpg"):
                 remove_if_exists(p)
 
 
+# --------------------------------------------------------------------------- #
+# Status Notifier & Multi-Channel Controller
+# --------------------------------------------------------------------------- #
 class StatusNotifier:
     def __init__(self, args):
         self.args = args
@@ -429,7 +436,8 @@ class StatusNotifier:
 
     def _clean(self, text):
         cleaned = text
-        for secret in (self.token, getattr(self.args, "ntfy_token", None),
+        for secret in (self.token, getattr(self.args, "ntfy_password", None),
+                       getattr(self.args, "ntfy_token", None),
                        getattr(self.args, "dc_password", None)):
             if secret:
                 cleaned = cleaned.replace(secret, "***")
@@ -459,8 +467,7 @@ class StatusNotifier:
                 fields["reply_markup"] = json.dumps(markup)
             tg_request(self.token, "sendMessage", fields, retries=retries, timeout=timeout)
         if self.ntfy_enabled:
-            ntfy_send_text(self.args.ntfy_server, self.args.ntfy_topic, text,
-                           token=self.args.ntfy_token, retries=retries, timeout=timeout)
+            ntfy_send_text(self.args, text, retries=retries, timeout=timeout)
         if self.dc_enabled:
             dc_send_message(self.args, text, retries=retries, timeout=timeout)
 
@@ -486,6 +493,8 @@ class StatusNotifier:
 
 
 class TelegramController:
+    """Listens for remote commands from Telegram, ntfy, and DeltaChat simultaneously."""
+
     def __init__(self, args, notifier):
         self.args = args
         self.token = args.bottoken
@@ -518,10 +527,14 @@ class TelegramController:
         self.wake_event.clear()
 
     def _register_bot_menu(self):
+        if not has_telegram(self.args):
+            return
         tg_request_raw(self.token, "setMyCommands",
                        {"commands": json.dumps(BOT_COMMANDS_SPEC)}, retries=1, timeout=15)
 
     def _flush_old_updates(self):
+        if not has_telegram(self.args):
+            return None
         data = tg_request_raw(self.token, "getUpdates", {"offset": "-1", "timeout": "0"},
                               retries=1, timeout=15)
         if data and data.get("result"):
@@ -595,7 +608,11 @@ class TelegramController:
         topic = self.args.ntfy_topic
         since_cursor = str(int(time()))
         headers = {"User-Agent": "SecCam-Termux/2.0"}
-        if self.args.ntfy_token:
+        if getattr(self.args, "ntfy_user", None) and getattr(self.args, "ntfy_password", None):
+            credentials = f"{self.args.ntfy_user}:{self.args.ntfy_password}"
+            encoded = base64.b64encode(credentials.encode("utf-8")).decode("utf-8")
+            headers["Authorization"] = f"Basic {encoded}"
+        elif getattr(self.args, "ntfy_token", None):
             headers["Authorization"] = f"Bearer {self.args.ntfy_token}"
 
         while not self._stop_event.is_set():
