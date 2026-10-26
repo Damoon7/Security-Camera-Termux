@@ -71,7 +71,7 @@ def prepare_tg_photo(filepath, max_dim=1920, quality=82):
             img.convert("RGB").save(opt_path, "JPEG", quality=quality, optimize=True)
         return opt_path
     except Exception as exc:
-        log.warning("Could not optimise %s for Telegram (%s); sending original", filepath, exc)
+        log.warning("Could not optimise %s (%s); sending original", filepath, exc)
         remove_if_exists(opt_path)
         return filepath
 
