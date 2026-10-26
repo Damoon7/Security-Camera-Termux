@@ -189,14 +189,16 @@ def parse_args():
     p.add_argument("-st", "--sensitivity", help="Detection sensitivity %% (default: 100)", type=int, default=100)
     p.add_argument("-ch", "--chatid", help="Telegram chat id (or env TG_CHAT_ID)", type=str)
     p.add_argument("-bt", "--bottoken", help="Telegram bot token (or env TG_BOT_TOKEN)", type=str)
-    p.add_argument("--ntfy-topic", help="ntfy topic name for push alerts & remote commands (or env NTFY_TOPIC)", type=str)
+    p.add_argument("--ntfy-topic", help="ntfy topic name (or env NTFY_TOPIC)", type=str)
     p.add_argument("--ntfy-server", help="ntfy server URL (default: https://ntfy.sh or env NTFY_SERVER)", type=str)
-    p.add_argument("--ntfy-token", help="ntfy access token if topic is protected (or env NTFY_TOKEN)", type=str)
+    p.add_argument("--ntfy-user", help="ntfy username for HTTP Basic auth (or env NTFY_USER)", type=str)
+    p.add_argument("--ntfy-password", help="ntfy password for HTTP Basic auth (or env NTFY_PASSWORD)", type=str)
+    p.add_argument("--ntfy-token", help="ntfy access token if protected (or env NTFY_TOKEN)", type=str)
     p.add_argument("--dc-email", help="DeltaChat / email sender address (or env DC_EMAIL)", type=str)
     p.add_argument("--dc-password", help="DeltaChat / email password (or env DC_PASSWORD)", type=str)
-    p.add_argument("--dc-to", help="Recipient DeltaChat address to alert & accept commands from (or env DC_TO)", type=str)
+    p.add_argument("--dc-to", help="Recipient DeltaChat address (or env DC_TO)", type=str)
     p.add_argument("--dc-smtp-host", help="SMTP host override (or env DC_SMTP_HOST)", type=str)
-    p.add_argument("--dc-smtp-port", help="SMTP port override (default: auto 465/587 or env DC_SMTP_PORT)", type=int)
+    p.add_argument("--dc-smtp-port", help="SMTP port override (or env DC_SMTP_PORT)", type=int)
     p.add_argument("--dc-imap-host", help="IMAP host override (or env DC_IMAP_HOST)", type=str)
     p.add_argument("--dc-imap-port", help="IMAP SSL port (default: 993 or env DC_IMAP_PORT)", type=int)
     p.add_argument("--schedule", help="Active hours in 24h HH:MM-HH:MM format (e.g. 20:00-08:00)", type=str)
@@ -227,6 +229,10 @@ def parse_args():
         args.ntfy_topic = os.environ.get("NTFY_TOPIC")
     if args.ntfy_server is None:
         args.ntfy_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+    if args.ntfy_user is None:
+        args.ntfy_user = os.environ.get("NTFY_USER")
+    if args.ntfy_password is None:
+        args.ntfy_password = os.environ.get("NTFY_PASSWORD")
     if args.ntfy_token is None:
         args.ntfy_token = os.environ.get("NTFY_TOKEN")
 
