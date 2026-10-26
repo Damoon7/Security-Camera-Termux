@@ -19,10 +19,12 @@ Already have **Termux** and **Termux:API** installed from F-Droid with Camera & 
 pkg update -y && pkg install python python-pillow python-numpy termux-api git curl -y
 git clone https://github.com/Damoon7/Security-Camera-Termux.git
 cd Security-Camera-Termux
-python3 SecCam.py --ntfy-topic my_secret_cam_9876
+python3 SecCam.py --ntfy-topic my_secret_cam_CHANGE_THIS
 ```
 
-*(Subscribe to `my_secret_cam_9876` in the free **ntfy** app on your main phone to receive instant motion photos and send remote commands like `/snap`, `/status`, or `/pause 30`—or see below to configure **Telegram** and **DeltaChat**!)*
+> ⚠️ **Important Security Note:** Replace `my_secret_cam_CHANGE_THIS` with your own unique, random topic name (e.g., `cam_` followed by random letters/numbers). Never use a common or default name, as public `ntfy.sh` topics can be subscribed to by anyone who knows the name!
+>
+> Open the free **ntfy** app on your phone, subscribe to that exact secret topic, and you will instantly receive motion alerts, photos, and control buttons (`/snap`, `/status`, `/pause`). See below to configure **Telegram** and **DeltaChat**!
 
 ---
 
