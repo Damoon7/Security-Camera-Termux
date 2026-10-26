@@ -10,7 +10,7 @@ The project is organized into a clean, modular structure (`SecCam.py`, `config.p
 
 * **Modular Architecture:** Cleanly separated into independent modules for configuration (`config.py`), vision processing (`vision.py`), power monitoring (`power.py`), multi-channel remote messaging (`tg_delta_ntfy_mgr.py`), and main execution (`SecCam.py`).
 * **Multi-Channel Alerts & Remote Control (Telegram + ntfy + DeltaChat):** Use Telegram, ntfy, or DeltaChat—individually or all at the same time! Built entirely with Python's standard library (`urllib`, `smtplib`, `imaplib`, `email`) and `curl`, requiring zero heavy extra packages in Termux.
-* **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames (see *Automatic Calibration* below).
+* **Zero-Config Calibration:** On startup the script waits until the phone is placed down and the scene is still, then learns the camera's sensor noise to set a motion threshold automatically. Brightness and contrast are normalized when comparing frames, so gradual lighting changes are tolerated. While running, the threshold is also re-tuned slowly from calm frames.
 * **Interactive Control Panel:** Automatically registers the official Telegram `/` command menu, displays a persistent bottom button pad (`📸 Snap`, `📊 Status`, `⏸️ Pause`, `▶️ Resume`, `🎯 Sensitivity`, `🕒 Schedule`, `🔧 Calibrate`, `🛑 Stop`), attaches quick-action buttons to `ntfy` notifications, and accepts slash commands (`/status`, `/snap`, `/pause`, etc.) across Telegram, ntfy, and DeltaChat.
 * **Active Hours Scheduling:** Optionally restrict surveillance to specific hours (for example `--schedule 20:00-08:00`). Outside the active window the camera waits in low-power standby and automatically calibrates when the active window begins.
 * **Dynamic Event Recording & Glitch Filter:** Confirming motion across two consecutive frames filters out single-frame autofocus/auto-exposure glitches on older phones, then keeps recording while motion persists and stops once the scene calms down. Both the initial trigger photo and confirmation frame are kept as the first evidence frames.
@@ -88,13 +88,16 @@ export TG_CHAT_ID="123456789"
 
 # --- Option B: ntfy push notifications & remote control (optional) ---
 export NTFY_TOPIC="seccam_my_secret_topic_9876"
+# export NTFY_CMD_TOPIC="seccam_my_command_topic_9876"
 # export NTFY_SERVER="https://ntfy.sh"
 # export NTFY_TOKEN="tk_your_optional_token"
+# export NTFY_USER="your_optional_username"
+# export NTFY_PASSWORD="your_optional_password"
 
-# --- Option C: DeltaChat / Chatmail encrypted chat (optional) ---
-export DC_EMAIL="camera_account@nine.testrun.org"
+# --- Option C: DeltaChat / Standard Email SMTP+IMAP (optional) ---
+export DC_EMAIL="camera_account@example.com"
 export DC_PASSWORD="your_camera_account_password"
-export DC_TO="your_personal_account@nine.testrun.org"
+export DC_TO="your_personal_account@example.com"
 ```
 
 Save and exit nano (`Ctrl + X`, then `Y`, then `Enter`), restrict permissions, and load the file:
@@ -104,9 +107,9 @@ chmod 600 ~/.seccam_env
 . ~/.seccam_env
 ```
 
-> 💡 **How to set up ntfy:** Install the free **ntfy** app on your phone (from F-Droid or Google Play), tap `+` to subscribe to your secret topic name (e.g. `seccam_my_secret_topic_9876`), and pass `--ntfy-topic seccam_my_secret_topic_9876` (or set `NTFY_TOPIC`). You will receive instant push alerts with photos and action buttons (`Snap`, `Status`, `Pause 30m`), and you can send commands like `/snap`, `/status`, `/pause 20`, `/resume`, or `/stop confirm` right from the ntfy app!
+> 💡 **How to set up ntfy:** Install the free **ntfy** app on your phone (from F-Droid or Google Play), tap `+` to subscribe to your topic name, and set `NTFY_TOPIC`. For self-hosted servers with strict ACLs, you can authenticate via Bearer token (`NTFY_TOKEN`) or HTTP Basic auth (`NTFY_USER` + `NTFY_PASSWORD`), and optionally specify a separate command topic (`NTFY_CMD_TOPIC`) if your camera account writes to one topic and reads user commands from another.
 >
-> 💡 **How to set up DeltaChat:** Create a free account for the camera in the DeltaChat app (for example on a Chatmail server like `nine.testrun.org` or any standard email server with SMTP/IMAP), export its address and password in `DC_EMAIL` and `DC_PASSWORD`, and set `DC_TO` to your own DeltaChat address. The camera will send photos, videos, and status updates directly into your DeltaChat conversation and execute commands you send back to it!
+> 💡 **How to set up DeltaChat:** Use any standard email account with SMTP/IMAP enabled for the camera (`DC_EMAIL` and `DC_PASSWORD`), and set `DC_TO` to the address logged into your DeltaChat app. The camera will send photos, videos, and status updates directly into your DeltaChat conversation and execute commands you send back to it!
 
 ### Run Surveillance
 
@@ -165,9 +168,12 @@ To make the security camera run automatically whenever the phone boots up or res
 | `-st`, `--sensitivity` | Detection sensitivity in percent, `1`–`500` (higher = more sensitive) | `100` |
 | `-ch`, `--chatid` | Numeric Telegram Chat ID (overrides `TG_CHAT_ID`) | `None` |
 | `-bt`, `--bottoken` | Telegram Bot Token (overrides `TG_BOT_TOKEN`) | `None` |
-| `--ntfy-topic` | Secret topic name for ntfy push alerts & remote control (overrides `NTFY_TOPIC`) | `None` |
+| `--ntfy-topic` | Topic name for outgoing ntfy alerts (overrides `NTFY_TOPIC`) | `None` |
+| `--ntfy-cmd-topic` | Topic name for incoming ntfy commands if separate (overrides `NTFY_CMD_TOPIC`) | Same as `--ntfy-topic` |
 | `--ntfy-server` | ntfy server URL (overrides `NTFY_SERVER`) | `https://ntfy.sh` |
-| `--ntfy-token` | Access token for protected ntfy topics (overrides `NTFY_TOKEN`) | `None` |
+| `--ntfy-token` | Bearer token for protected ntfy topics (overrides `NTFY_TOKEN`) | `None` |
+| `--ntfy-user` | Username for ntfy HTTP Basic auth (overrides `NTFY_USER`) | `None` |
+| `--ntfy-password` | Password for ntfy HTTP Basic auth (overrides `NTFY_PASSWORD`) | `None` |
 | `--dc-email` | DeltaChat / email sender address for the camera (overrides `DC_EMAIL`) | `None` |
 | `--dc-password` | DeltaChat / email password for the camera (overrides `DC_PASSWORD`) | `None` |
 | `--dc-to` | Your recipient DeltaChat address (overrides `DC_TO`) | `None` |
