@@ -147,10 +147,19 @@ def validate_args(args):
         args.ntfy_topic = args.ntfy_topic.strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", args.ntfy_topic):
             sys.exit("Error: --ntfy-topic must be 3-128 characters (letters, digits, _ or -)")
+    if args.ntfy_cmd_topic is not None:
+        args.ntfy_cmd_topic = args.ntfy_cmd_topic.strip()
+        if not re.fullmatch(r"[A-Za-z0-9_-]{3,128}", args.ntfy_cmd_topic):
+            sys.exit("Error: --ntfy-cmd-topic must be 3-128 characters (letters, digits, _ or -)")
+    elif args.ntfy_topic is not None:
+        args.ntfy_cmd_topic = args.ntfy_topic
+
     if args.ntfy_server:
         args.ntfy_server = args.ntfy_server.strip().rstrip("/")
         if not args.ntfy_server.startswith(("http://", "https://")):
             sys.exit("Error: --ntfy-server must start with http:// or https://")
+    if (args.ntfy_user is None) != (args.ntfy_password is None):
+        sys.exit("Error: both --ntfy-user and --ntfy-password are required for ntfy Basic auth")
 
     dc_fields = (args.dc_email, args.dc_password, args.dc_to)
     if any(dc_fields) and not all(dc_fields):
@@ -189,11 +198,12 @@ def parse_args():
     p.add_argument("-st", "--sensitivity", help="Detection sensitivity %% (default: 100)", type=int, default=100)
     p.add_argument("-ch", "--chatid", help="Telegram chat id (or env TG_CHAT_ID)", type=str)
     p.add_argument("-bt", "--bottoken", help="Telegram bot token (or env TG_BOT_TOKEN)", type=str)
-    p.add_argument("--ntfy-topic", help="ntfy topic name (or env NTFY_TOPIC)", type=str)
+    p.add_argument("--ntfy-topic", help="ntfy topic for outgoing alerts (or env NTFY_TOPIC)", type=str)
+    p.add_argument("--ntfy-cmd-topic", help="ntfy topic for incoming commands if separate (or env NTFY_CMD_TOPIC)", type=str)
     p.add_argument("--ntfy-server", help="ntfy server URL (default: https://ntfy.sh or env NTFY_SERVER)", type=str)
+    p.add_argument("--ntfy-token", help="ntfy Bearer token (or env NTFY_TOKEN)", type=str)
     p.add_argument("--ntfy-user", help="ntfy username for HTTP Basic auth (or env NTFY_USER)", type=str)
     p.add_argument("--ntfy-password", help="ntfy password for HTTP Basic auth (or env NTFY_PASSWORD)", type=str)
-    p.add_argument("--ntfy-token", help="ntfy access token if protected (or env NTFY_TOKEN)", type=str)
     p.add_argument("--dc-email", help="DeltaChat / email sender address (or env DC_EMAIL)", type=str)
     p.add_argument("--dc-password", help="DeltaChat / email password (or env DC_PASSWORD)", type=str)
     p.add_argument("--dc-to", help="Recipient DeltaChat address (or env DC_TO)", type=str)
@@ -227,14 +237,16 @@ def parse_args():
 
     if args.ntfy_topic is None:
         args.ntfy_topic = os.environ.get("NTFY_TOPIC")
+    if args.ntfy_cmd_topic is None:
+        args.ntfy_cmd_topic = os.environ.get("NTFY_CMD_TOPIC")
     if args.ntfy_server is None:
         args.ntfy_server = os.environ.get("NTFY_SERVER", "https://ntfy.sh")
+    if args.ntfy_token is None:
+        args.ntfy_token = os.environ.get("NTFY_TOKEN")
     if args.ntfy_user is None:
         args.ntfy_user = os.environ.get("NTFY_USER")
     if args.ntfy_password is None:
         args.ntfy_password = os.environ.get("NTFY_PASSWORD")
-    if args.ntfy_token is None:
-        args.ntfy_token = os.environ.get("NTFY_TOKEN")
 
     if args.dc_email is None:
         args.dc_email = os.environ.get("DC_EMAIL")
