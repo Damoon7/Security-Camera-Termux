@@ -5,6 +5,8 @@
 [![Python: 3.8+](https://img.shields.io/badge/Python-3.8%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Channels: Telegram | ntfy | DeltaChat | SMS](https://img.shields.io/badge/Alerts-Telegram%20%7C%20ntfy%20%7C%20DeltaChat%20%7C%20SMS-blue)](#)
 
+[📖 راهنمای فارسی (Persian Documentation)](README_FA.md)
+
 Turn a spare or old Android phone into an intelligent, motion-detecting security camera using **Termux** and **Python**.
 
 The project is organized into a clean, modular structure (`SecCam.py`, `config.py`, `vision.py`, `power.py`, `tg_delta_ntfy_mgr.py`) and continuously watches the room through the device camera. When movement is detected, it records evidence until motion stops, captures ambient audio, and sends notifications and media via **Telegram**, **ntfy**, **DeltaChat**, **SMS**, and **phone call**—while letting you control the camera remotely from Telegram, ntfy, or DeltaChat.
